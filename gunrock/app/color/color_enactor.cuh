@@ -90,7 +90,8 @@ struct ColorIterationLoop
     auto &color_temp = data_slice.color_temp;
     auto &color_temp2 = data_slice.color_temp2;
     auto &prohibit = data_slice.prohibit;
-    auto &color_balance = data_slice.color_balance;
+    //auto &color_balance = data_slice.color_balance;
+    auto &loop_color = data_slice.loop_color;
     auto &colored = data_slice.colored;
     auto &use_jpl = data_slice.use_jpl;
     auto &no_conflict = data_slice.no_conflict;
@@ -107,41 +108,41 @@ struct ColorIterationLoop
     // Jones-Plassman-Luby Graph Coloring: Compute Operator                 //
     //======================================================================//
     if (use_jpl) {
-      if (!color_balance) {
+      if (loop_color) {
+	//printf("DEBUG: Using normal jpl\n");
         if (iteration % 2)
 	   curandGenerateUniform(gen, rand.GetPointer(util::DEVICE), graph.nodes);
-
+	//printf("DEBUG: finish initialize rand array \n");
         auto jpl_color_op =
             [graph, colors, rand, iteration, min_color, colored] __host__ __device__(
-// #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
+//#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
 //                const int &counter, const VertexT &v) {
-// #else
+//#else
                 VertexT * v_q, const SizeT &pos) {
               VertexT v = pos; // v_q[pos];
-// #endif
+//#endif
 	      if (pos == 0) colored[0] = 0; // reset colored ahead-of-time
               if (util::isValid(colors[v])) return;
-
               SizeT start_edge = graph.CsrT::GetNeighborListOffset(v);
               SizeT num_neighbors = graph.CsrT::GetNeighborListLength(v);
 
               bool colormax = true;
               bool colormin = true;
               int color = iteration * 2;
-
+	      //printf("DEBUG: Start comparing node %d with all its neighbor \n", v);
               for (SizeT e = start_edge; e < start_edge + num_neighbors; e++) {
                 VertexT u = graph.CsrT::GetEdgeDest(e);
-
                 if ((util::isValid(colors[u])) && (colors[u] != color + 1) &&
                         (colors[u] != color + 2) ||
                     (v == u))
                   continue;
+		 
                 if (rand[v] <= rand[u]) colormax = false;
                 if (min_color) {
                   if (rand[v] >= rand[u]) colormin = false;
                 }
               }
-
+	      //printf("DEBUG: start coloring IS\n");
               if (colormax) colors[v] = color + 1;
               if (min_color) {
                 if (colormin) colors[v] = color + 2;
@@ -165,6 +166,8 @@ struct ColorIterationLoop
 
         GUARD_CU(frontier.V_Q()->ForAll(jpl_color_op, frontier.queue_length,
                                         util::DEVICE, stream));
+	GUARD_CU2(cudaStreamSynchronize(stream), "cudaStreamSynchronize failed");
+	//printf("DEBUG: End iteration %d \n", iteration);
 // #endif
 
       }
@@ -173,7 +176,8 @@ struct ColorIterationLoop
         //======================================================================//
         // Jones-Plassman-Luby Graph Coloring: NeighborReduce + Compute Op //
         //======================================================================//
-        auto advance_op = [graph, iteration, colors, rand] __host__ __device__(
+        printf("DEBUG: using ar jpl \n");
+	auto advance_op = [graph, iteration, colors, rand] __host__ __device__(
                               const VertexT &src, VertexT &dest,
                               const SizeT &edge_id, const VertexT &input_item,
                               const SizeT &input_pos,

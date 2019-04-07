@@ -54,8 +54,8 @@ cudaError_t UseParameters(util::Parameters &parameters) {
 
   GUARD_CU(parameters.Use<bool>(
       "loop-color", util::REQUIRED_ARGUMENT | util::OPTIONAL_PARAMETER, true,
-      "Serially compare rand to all node neighbor, disable to use advance \
-      neighbor reduce (default=false)",
+      "Serially compare rand to all node neighbor, set to false to use advance \
+      neighbor reduce (default=true)",
       __FILE__, __LINE__));
 
   GUARD_CU(parameters.Use<bool>(

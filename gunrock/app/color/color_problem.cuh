@@ -70,7 +70,8 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
     util::Array1D<SizeT, bool> visited;
 
     curandGenerator_t gen;
-    bool color_balance;
+    //bool color_balance;
+    bool loop_color;
     bool use_jpl;
     bool test_run;
     int no_conflict;
@@ -112,7 +113,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
         GUARD_CU(visited.Release(target));
         GUARD_CU(prohibit.Release(target));
       }
-      if (color_balance) {
+      if (!loop_color) {
         GUARD_CU(color_temp.Release(target));
         GUARD_CU(color_temp2.Release(target));
         GUARD_CU(color_predicate.Release(target));
@@ -135,14 +136,15 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
      */
     cudaError_t Init(GraphT &sub_graph, int num_gpus, int gpu_idx,
                      util::Location target, ProblemFlag flag,
-                     bool color_balance_, int seed, int user_iter_,
+                     bool loop_color_, int seed, int user_iter_,
                      bool min_color_, bool test_run_, bool use_jpl_,
                      int no_conflict_, int prohibit_size_) {
       cudaError_t retval = cudaSuccess;
 
       GUARD_CU(BaseDataSlice::Init(sub_graph, num_gpus, gpu_idx, target, flag));
 
-      color_balance = color_balance_;
+      //color_balance = color_balance_;
+      loop_color = loop_color_;
       user_iter = user_iter_;
       min_color = min_color_;
       test_run = test_run_;
@@ -156,7 +158,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
         GUARD_CU(visited.Allocate(sub_graph.nodes, target));
         GUARD_CU(prohibit.Allocate(sub_graph.nodes * prohibit_size, target));
       }
-      if (color_balance) {
+      if (!loop_color) {
         printf("DEBUG: allocating for advance \n");
         GUARD_CU(color_temp.Allocate(sub_graph.edges, target));
         GUARD_CU(color_temp2.Allocate(sub_graph.edges, target));
@@ -186,7 +188,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
         GUARD_CU(visited.EnsureSize_(nodes, target));
         GUARD_CU(prohibit.EnsureSize_(nodes * prohibit_size, target));
       }
-      if (color_balance) {
+      if (!loop_color) {
         GUARD_CU(color_temp.EnsureSize_(edges, target));
         GUARD_CU(color_temp2.EnsureSize_(edges, target));
         GUARD_CU(color_predicate.EnsureSize_(nodes, target));
@@ -206,7 +208,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
             },
             nodes, target, this->stream));
       }
-      if (color_balance) {
+      if (!loop_color) {
         GUARD_CU(color_temp.ForEach(
             [] __host__ __device__(ValueT & x) {
               x = util::PreDefinedValues<ValueT>::InvalidValue;
@@ -253,7 +255,8 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
   bool min_color;
   bool test_run;
   bool use_jpl;
-  bool color_balance;
+  //bool color_balance;
+  bool loop_color;
   int no_conflict;
   int prohibit_size;
 
@@ -266,7 +269,8 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
   Problem(util::Parameters &_parameters, ProblemFlag _flag = Problem_None)
       : BaseProblem(_parameters, _flag), data_slices(NULL) {
     seed = _parameters.Get<int>("seed");
-    color_balance = _parameters.Get<bool>("LBCOLOR");
+    //color_balance = _parameters.Get<bool>("LBCOLOR");
+    loop_color = _parameters.Get<bool>("loop-color");
     min_color = _parameters.Get<bool>("min-color");
     user_iter = _parameters.Get<int>("user-iter");
     test_run = _parameters.Get<bool>("test-run");
@@ -386,7 +390,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
       auto &data_slice = data_slices[gpu][0];
       GUARD_CU(data_slice.Init(this->sub_graphs[gpu], this->num_gpus,
                                this->gpu_idx[gpu], target, this->flag,
-                               this->color_balance, this->seed, this->user_iter,
+                               this->loop_color, this->seed, this->user_iter,
                                this->min_color, this->test_run, this->use_jpl,
                                this->no_conflict, this->prohibit_size));
     }
