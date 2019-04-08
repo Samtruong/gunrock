@@ -24,10 +24,12 @@ ADDR_ARRAY=($addr0 $addr1 $addr2 $addr3 $addr4)
 	--no-conflict=0 \
 	--user-iter=0 \
 	--prohibit-size=0 \
-	--quick=false \
+	--quick=true \
 	--device=0 \
 	--min-color=true \
 	--test-run=true \
 	--undirected \
 	--remove-duplicate-edges \
-	--remove-self-loops 
+	--remove-self-loops \
+        --loop-color=true \
+        --check-percentage=true

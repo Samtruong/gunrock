@@ -72,6 +72,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
     curandGenerator_t gen;
     //bool color_balance;
     bool loop_color;
+    bool check_percentage;
     bool use_jpl;
     bool test_run;
     int no_conflict;
@@ -138,12 +139,13 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
                      util::Location target, ProblemFlag flag,
                      bool loop_color_, int seed, int user_iter_,
                      bool min_color_, bool test_run_, bool use_jpl_,
-                     int no_conflict_, int prohibit_size_) {
+                     int no_conflict_, int prohibit_size_, bool check_percentage_) {
       cudaError_t retval = cudaSuccess;
 
       GUARD_CU(BaseDataSlice::Init(sub_graph, num_gpus, gpu_idx, target, flag));
 
       //color_balance = color_balance_;
+      check_percentage = check_percentage_;
       loop_color = loop_color_;
       user_iter = user_iter_;
       min_color = min_color_;
@@ -257,6 +259,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
   bool use_jpl;
   //bool color_balance;
   bool loop_color;
+  bool check_percentage;
   int no_conflict;
   int prohibit_size;
 
@@ -270,6 +273,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
       : BaseProblem(_parameters, _flag), data_slices(NULL) {
     seed = _parameters.Get<int>("seed");
     //color_balance = _parameters.Get<bool>("LBCOLOR");
+    check_percentage = _parameters.Get<bool>("check-percentage");
     loop_color = _parameters.Get<bool>("loop-color");
     min_color = _parameters.Get<bool>("min-color");
     user_iter = _parameters.Get<int>("user-iter");
@@ -392,7 +396,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG> {
                                this->gpu_idx[gpu], target, this->flag,
                                this->loop_color, this->seed, this->user_iter,
                                this->min_color, this->test_run, this->use_jpl,
-                               this->no_conflict, this->prohibit_size));
+                               this->no_conflict, this->prohibit_size, this->check_percentage));
     }
 
     return retval;

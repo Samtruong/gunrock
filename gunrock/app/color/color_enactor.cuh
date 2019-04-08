@@ -91,6 +91,7 @@ struct ColorIterationLoop
     auto &color_temp2 = data_slice.color_temp2;
     auto &prohibit = data_slice.prohibit;
     //auto &color_balance = data_slice.color_balance;
+    auto &check_percentage = data_slice.check_percentage;
     auto &loop_color = data_slice.loop_color;
     auto &colored = data_slice.colored;
     auto &use_jpl = data_slice.use_jpl;
@@ -109,10 +110,10 @@ struct ColorIterationLoop
     //======================================================================//
     if (use_jpl) {
       if (loop_color) {
-	//printf("DEBUG: Using normal jpl\n");
         if (iteration % 2)
 	   curandGenerateUniform(gen, rand.GetPointer(util::DEVICE), graph.nodes);
 	//printf("DEBUG: finish initialize rand array \n");
+	
         auto jpl_color_op =
             [graph, colors, rand, iteration, min_color, colored] __host__ __device__(
 //#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
@@ -121,7 +122,7 @@ struct ColorIterationLoop
                 VertexT * v_q, const SizeT &pos) {
               VertexT v = pos; // v_q[pos];
 //#endif
-	      if (pos == 0) colored[0] = 0; // reset colored ahead-of-time
+	      if (pos == 0) colored[0] = 0; // reset colored ahead-of-time 
               if (util::isValid(colors[v])) return;
               SizeT start_edge = graph.CsrT::GetNeighborListOffset(v);
               SizeT num_neighbors = graph.CsrT::GetNeighborListLength(v);
@@ -176,7 +177,6 @@ struct ColorIterationLoop
         //======================================================================//
         // Jones-Plassman-Luby Graph Coloring: NeighborReduce + Compute Op //
         //======================================================================//
-        printf("DEBUG: using ar jpl \n");
 	auto advance_op = [graph, iteration, colors, rand] __host__ __device__(
                               const VertexT &src, VertexT &dest,
                               const SizeT &edge_id, const VertexT &input_item,
@@ -358,10 +358,15 @@ struct ColorIterationLoop
             if (util::isValid(x[pos])) atomicAdd(&colored[0], 1);
           },
           graph.nodes, util::DEVICE, stream));
-
+ 
       GUARD_CU2(cudaStreamSynchronize(stream), "cudaStreamSynchronize failed");
       GUARD_CU(colored.Move(util::DEVICE, util::HOST));
       GUARD_CU2(cudaStreamSynchronize(stream), "cudaStreamSynchronize failed");
+    }
+
+    if (check_percentage) {
+	float percentage = colored[0] / (float) graph.nodes * 100.0;
+	printf(" At iteration  %d, %f %% of the graph is colored \n", iteration, percentage);
     }
 
     return retval;
@@ -370,20 +375,22 @@ struct ColorIterationLoop
   bool Stop_Condition(int gpu_num = 0) {
     auto &data_slice = this->enactor->problem->data_slices[this->gpu_num][0];
     auto &enactor_slices = this->enactor->enactor_slices;
-    auto iter = enactor_slices[0].enactor_stats.iteration;
+    auto iteration = enactor_slices[0].enactor_stats.iteration;
     auto user_iter = data_slice.user_iter;
     auto &graph = data_slice.sub_graph[0];
     auto test_run = data_slice.test_run;
+    auto check_percentage = data_slice.check_percentage;
     auto frontier = enactor_slices[0].frontier;
+    auto colored = data_slice.colored[0];
 
     // atomic based stop condition
-    if (test_run && (data_slice.colored[0] >= graph.nodes)) {
-      printf("Max iteration: %d\n", iter);
+    if (test_run && (colored >= graph.nodes)) {
+      printf("Max iteration: %d\n", iteration);
       return true;
     }
 
     // user defined stop condition
-    if (!test_run && (iter == user_iter)) return true;
+    if (!test_run && (iteration == user_iter)) return true;
 
     return false;
   }

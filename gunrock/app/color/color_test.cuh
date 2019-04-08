@@ -152,7 +152,18 @@ typename GraphT::SizeT Validate_Results(util::Parameters &parameters,
   SizeT num_errors = 0;
   bool quiet = parameters.Get<bool>("quiet");
   bool quick = parameters.Get<bool>("quick");
+  bool check_percentage = parameters.Get<bool>("check-percentage");
+  int colored = 0;
 
+  // check percentage of graph that is colored
+  //if (check_percentage) {
+  //	for (SizeT v = 0; v < graph.nodes; v++) {
+  //		if (h_colors[v] != -1) colored++;
+  //	}
+  //	float percentage = colored / (float) graph.nodes * 100.0;
+  //	printf("%f %% of the graph is colored \n", percentage);
+  //}
+  
   // validating result with cpu and check for conflict
   if (!quick) {
     printf("Validating result ...  \n");
