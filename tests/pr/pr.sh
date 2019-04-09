@@ -19,6 +19,7 @@ read -p "Option: " set
 ./bin/test_pr_10.0_x86_64 \
 --graph-type=market \
 --graph-file=${ADDR_ARRAY[$set]} \
---src=largestdegree \
---device=0 
-~                 
+--device=0 \
+--iteration-num=10 \
+--normalized \
+--traversal-mode=LB 

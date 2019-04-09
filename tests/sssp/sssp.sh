@@ -20,4 +20,7 @@ read -p "Option: " set
 --graph-type=market \
 --graph-file=${ADDR_ARRAY[$set]} \
 --src=largestdegree \
---device=0 
+--device=0 \
+--queue-sizing=1 \
+--in-sizing=1 \
+--traversal-mode=LB
