@@ -12,6 +12,7 @@
 include ../BaseMakefile.mk
 ALGO = sssp
 EXEC = bin/test_$(ALGO)_$(NVCC_VERSION)_$(ARCH_SUFFIX)
+NVCCFLAGS += -lcurand
 
 test: $(EXEC)
 

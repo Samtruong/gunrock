@@ -6,7 +6,7 @@ addr1=${path}"roadNetCA.mtx"
 addr2=${path}"wikiTalk.mtx"
 addr3=${path}"amazon.mtx"
 addr4=${path}"dblp.mtx"
-addr5=${path}"twitter.mtx"
+addr5=${path}"twitter.mtx --64bit-SizeT"
 ADDR_ARRAY=($addr0 $addr1 $addr2 $addr3 $addr4 $addr5)
 echo "[0] Run youtube dataset"
 echo "[1] Run roadNetCA dataset"

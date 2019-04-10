@@ -52,6 +52,63 @@ cudaError_t UseParameters(util::Parameters &parameters)
         "seed to generate random sources",
         __FILE__, __LINE__));
 
+  GUARD_CU(parameters.Use<bool>(
+      "check-percentage", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, false,
+      "Display the percentage of number of nodes that are colored (default=false)",
+      __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<bool>(
+      "loop-color", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, true,
+      "Serially compare rand to all node neighbor, set to false to use advance \
+      neighbor reduce (default=true)",
+      __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<bool>(
+      "min-color", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, true,
+      "Enable coloring with minimum independent set as well as \
+      maximum(default=true)",
+      __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<bool>(
+      "test-run", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, true,
+      "Perform test run to atomically generate max iteration (default=true)",
+      __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<int>(
+      "user-iter",
+      util::REQUIRED_ARGUMENT | util::SINGLE_VALUE | util::INTERNAL_PARAMETER,
+      0, "Number of iterations color should run for (default=0).", __FILE__,
+      __LINE__));
+
+  GUARD_CU(parameters.Use<bool>(
+      "JPL", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, true,
+      "Use JPL exact coloring method (true=use JPL).", __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<int>(
+      "no-conflict", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, 0,
+      "Resolve color conflict, 0 to skip check, 1 to check at end of\
+      every iteration with random,\
+      2 to check at end of every iteration with degree(default = 0).",
+      __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<int>(
+      "prohibit-size", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, 0,
+      "Needed to allocate memory for hash function, if parameter is\
+      positive,\
+     hash coloring is used instead of random coloring (default = 0).",
+      __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<int>(
+      "seed", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, time(NULL),
+      "seed for random number generator", __FILE__, __LINE__));
+
+  GUARD_CU(parameters.Use<bool>(
+      "LBCOLOR", util::REQUIRED_ARGUMENT | util::INTERNAL_PARAMETER, false,
+      "load balancing enabled for graph coloring (true=neighbor_reduce)",
+      __FILE__, __LINE__));
+
+
+
     return retval;
 }
 

@@ -22,4 +22,6 @@ read -p "Option: " set
 --device=0 \
 --iteration-num=10 \
 --normalized \
---traversal-mode=LB 
+--traversal-mode=LB \
+--num-run=100 \
+--quick --pull

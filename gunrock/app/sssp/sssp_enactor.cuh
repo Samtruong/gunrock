@@ -20,6 +20,17 @@
 #include <gunrock/app/sssp/sssp_problem.cuh>
 #include <gunrock/oprtr/oprtr.cuh>
 
+// Multi-stream Specific - Include
+//#include <gunrock/app/enactor_types.cuh>
+#include <gunrock/app/frontier.cuh>
+#include <unistd.h>
+#define NUM_STREAM 5
+
+// Graph Coloring Specific - Include
+#include <gunrock/app/color/color_enactor.cuh>
+#include <gunrock/app/color/color_test.cuh>
+
+
 namespace gunrock {
 namespace app {
 namespace sssp {
@@ -66,6 +77,8 @@ struct SSSPIterationLoop : public IterationLoopBase
     cudaError_t Core(int peer_ = 0)
     {
         // Data sssp that works on
+	auto frontiers = this->enactor->frontiers;
+	auto streams = this->enactor->streams;
         auto         &data_slice         =   this -> enactor ->
             problem -> data_slices[this -> gpu_num][0];
         auto         &enactor_slice      =   this -> enactor ->
@@ -227,6 +240,20 @@ public:
     typedef Enactor<Problem, ARRAY_FLAG, cudaHostRegisterFlag>
         EnactorT;
     typedef SSSPIterationLoop<EnactorT> IterationT;
+    
+// Multi-stream Specific - Public Attribute
+//typedef EnactorSlice<GraphT, LabelT, ARRAY_FLAG, cudaHostRegisterFlag> EnactorSliceT;
+//util::Array1D<int, EnactorSliceT, ARRAY_FLAG,
+//	cudaHostRegisterFlag>// | cudaHostAllocMapped | cudaHostAllocPortable>
+//	multi_stream_enactor_slices;
+typedef Frontier<VertexT, SizeT, ARRAY_FLAG, cudaHostRegisterFlag> FrontierT;
+util::Array1D<int, FrontierT> frontiers;
+cudaStream_t* streams = new cudaStream_t[NUM_STREAM];
+
+// Graph Coloring Specific - Public Attribute
+typedef color::Problem<GraphT> ColorProblemT;
+typedef color::Enactor<ColorProblemT> ColorEnactorT;
+ColorEnactorT color_enactor;
 
     // Members
     Problem     *problem   ;
@@ -242,11 +269,17 @@ public:
      */
     Enactor() :
         BaseEnactor("sssp"),
+	color_enactor(),
         problem    (NULL  )
     {
         this -> max_num_vertex_associates
             = (Problem::FLAG & Mark_Predecessors) != 0 ? 1 : 0;
         this -> max_num_value__associates = 1;
+
+// Multi-stream Specific - Constructor
+//this->multi_stream_enactor_slices.SetName("multi_stream_enactor_slices");
+this->frontiers.SetName("frontiers");
+
     }
 
     /**
@@ -264,10 +297,29 @@ public:
      */
     cudaError_t Release(util::Location target = util::LOCATION_ALL)
     {
-        cudaError_t retval = cudaSuccess;
+	cudaError_t retval = cudaSuccess;
         GUARD_CU(BaseEnactor::Release(target));
         delete []iterations; iterations = NULL;
         problem = NULL;
+
+// Multi-stream specific - Release
+//if (this->multi_stream_enactor_slices.GetPointer(util::HOST) != NULL) {
+//      for (int i = 0; i < NUM_STREAM; i++)
+//              GUARD_CU(this->multi_stream_enactor_slices[i].Release(target));
+//}
+//GUARD_CU(this->multi_stream_enactor_slices.Release(target);
+if (this->frontiers.GetPointer(util::HOST) != NULL) {
+        for (int i = 0; i < NUM_STREAM; i++)
+                GUARD_CU(this->frontiers[i].Release(target));
+GUARD_CU(this->frontiers.Release(target));
+}
+if (this->streams != NULL) {
+        for (int i = 0; i < NUM_STREAM; i++){
+               util::GRError(cudaStreamDestroy(this->streams[i]),
+                        "cudaStreamDestroy failed.", __FILE__, __LINE__);
+}
+free(this->streams);
+}
         return retval;
     }
 
@@ -281,27 +333,29 @@ public:
         Problem          &problem,
         util::Location    target = util::DEVICE)
     {
+
         cudaError_t retval = cudaSuccess;
         this->problem = &problem;
 
         GUARD_CU(BaseEnactor::Init(
             problem, Enactor_None, 2, NULL, target, false));
-        for (int gpu = 0; gpu < this -> num_gpus; gpu ++)
-        {
-            GUARD_CU(util::SetDevice(this -> gpu_idx[gpu]));
-            auto &enactor_slice
-                = this -> enactor_slices[gpu * this -> num_gpus + 0];
-            auto &graph = problem.sub_graphs[gpu];
-            GUARD_CU(enactor_slice.frontier.Allocate(
-                graph.nodes, graph.edges, this -> queue_factors));
 
-            for (int peer = 0; peer < this -> num_gpus; peer ++)
-            {
-                this -> enactor_slices[gpu * this -> num_gpus + peer]
-                    .oprtr_parameters.labels
-                    = &(problem.data_slices[gpu] -> labels);
-            }
-        }
+        //for (int gpu = 0; gpu < this -> num_gpus; gpu ++)
+        //{
+        //    GUARD_CU(util::SetDevice(this -> gpu_idx[gpu]));
+        //    auto &enactor_slice
+        //        = this -> enactor_slices[gpu * this -> num_gpus + 0];
+        //    auto &graph = problem.sub_graphs[gpu];
+        //    GUARD_CU(enactor_slice.frontier.Allocate(
+        //        graph.nodes, graph.edges, this -> queue_factors));
+
+        //    for (int peer = 0; peer < this -> num_gpus; peer ++)
+        //    {
+        //        this -> enactor_slices[gpu * this -> num_gpus + peer]
+        //            .oprtr_parameters.labels
+        //            = &(problem.data_slices[gpu] -> labels);
+        //    }
+        //}
 
         iterations = new IterationT[this -> num_gpus];
         for (int gpu = 0; gpu < this -> num_gpus; gpu ++)
@@ -311,6 +365,44 @@ public:
 
         GUARD_CU(this -> Init_Threads(this,
             (CUT_THREADROUTINE)&(GunrockThread<EnactorT>)));
+
+//Multi-stream Specific - Init
+//GUARD_CU(this->multi_stream_enactor_slices.Allocate(NUM_STREAM, util::HOST));
+GUARD_CU(this->frontiers.Allocate(NUM_STREAM, util::HOST));
+for (int i = 0; i < NUM_STREAM; i++) {
+	GUARD_CU(frontiers[i].Init(2, NULL, " ", target));
+	util::GRError(cudaStreamCreate(&(this->streams[i])),
+		"cudaStreamCreate failed.", __FILE__, __LINE__);
+}
+
+// Graph Coloring Specific - Init
+printf("Start Coloring Graph ... \n");
+util::CpuTimer cpu_timer;
+cpu_timer.Start();
+auto &color_problem = this->problem->color_problem;
+auto &color_enactor = this->color_enactor;
+color_enactor.Init(color_problem, target);
+GUARD_CU(cudaDeviceSynchronize());
+printf("Initialize color enactor \n");
+GUARD_CU(color_problem.Reset());
+GUARD_CU(cudaDeviceSynchronize());
+printf("Reset color problem \n");
+GUARD_CU(color_enactor.Reset());
+GUARD_CU(cudaDeviceSynchronize());
+printf("Reset color enactor and enact \n");
+GUARD_CU(color_enactor.Enact());
+GUARD_CU(cudaDeviceSynchronize());
+GUARD_CU(color_enactor.Release(target));
+GUARD_CU(cudaDeviceSynchronize());
+cpu_timer.Stop();
+printf("Total coloring time: %f ms \n", cpu_timer.ElapsedMillis());
+printf("Get partitioned graph into frontiers\n");
+//auto colors = (color_problem.data_slices[0][0]).colors;
+//printf("Colors of 40 first nodes: \n");
+//printf("[");
+//for (int i = 0; i <= 40; i++) 
+//	printf("%d : %d, ",i, colors[i]);
+//printf("]\n"); 
         return retval;
     }
 
@@ -322,10 +414,19 @@ public:
      */
     cudaError_t Reset(VertexT src, util::Location target = util::DEVICE)
     {
+
         typedef typename GraphT::GpT GpT;
         cudaError_t retval = cudaSuccess;
         GUARD_CU(BaseEnactor::Reset(target));
-        for (int gpu = 0; gpu < this->num_gpus; gpu++)
+        
+// Multi-stream Specific - Reset
+//for (int i = 0; i < NUM_STREAM; i++)
+//      GUARD_CU(this->multi_stream_enactor_slices[i].Reset(target));
+for (int i = 0; i < NUM_STREAM; i++) {
+        GUARD_CU(this->frontiers[i].Reset(target));
+}
+
+	for (int gpu = 0; gpu < this->num_gpus; gpu++)
         {
             if ((this->num_gpus == 1) ||
                 (gpu == this->problem->org_graph->GpT::partition_table[src]))
