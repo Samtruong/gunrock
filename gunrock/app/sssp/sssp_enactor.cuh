@@ -251,7 +251,7 @@ public:
 //	cudaHostRegisterFlag>// | cudaHostAllocMapped | cudaHostAllocPortable>
 //	multi_stream_enactor_slices;
 typedef Frontier<VertexT, SizeT, ARRAY_FLAG, cudaHostRegisterFlag> FrontierT;
-util::Array1D<int, FrontierT> frontiers;
+FrontierT * frontiers = new FrontierT [NUM_STREAM];
 cudaStream_t* streams = new cudaStream_t[NUM_STREAM];
 
 // Graph Coloring Specific - Public Attribute
@@ -280,10 +280,6 @@ ColorEnactorT color_enactor;
             = (Problem::FLAG & Mark_Predecessors) != 0 ? 1 : 0;
         this -> max_num_value__associates = 1;
 
-// Multi-stream Specific - Constructor
-//this->multi_stream_enactor_slices.SetName("multi_stream_enactor_slices");
-this->frontiers.SetName("frontiers");
-
     }
 
     /**
@@ -307,17 +303,17 @@ this->frontiers.SetName("frontiers");
         problem = NULL;
 
 // Multi-stream specific - Release
-if (this->frontiers.GetPointer(util::HOST) != NULL) {
+if (this->frontiers != NULL) {
         for (int i = 0; i < NUM_STREAM; i++)
                 GUARD_CU(this->frontiers[i].Release(target));
-GUARD_CU(this->frontiers.Release(target));
+delete [] this->frontiers;
 }
 if (this->streams != NULL) {
         for (int i = 0; i < NUM_STREAM; i++){
                util::GRError(cudaStreamDestroy(this->streams[i]),
                         "cudaStreamDestroy failed.", __FILE__, __LINE__);
 }
-free(this->streams);
+delete [] this->streams;
 }
         return retval;
     }
@@ -365,21 +361,13 @@ free(this->streams);
         GUARD_CU(this -> Init_Threads(this,
             (CUT_THREADROUTINE)&(GunrockThread<EnactorT>)));
 
-//Multi-stream Specific - Init
-auto &graph = problem.sub_graphs[0];
-GUARD_CU(this->frontiers.Allocate(NUM_STREAM, util::HOST));
-for (int i = 0; i < NUM_STREAM; i++) {
-	GUARD_CU(frontiers[i].Init(2, NULL, std::to_string(i), target));
-	util::GRError(cudaStreamCreate(&(this->streams[i])),
-		"cudaStreamCreate failed.", __FILE__, __LINE__);
-}
-
 // Graph Coloring Specific - Init
 printf("Start Coloring Graph ... \n");
 util::CpuTimer cpu_timer;
 cpu_timer.Start();
 
 //Set up
+auto &graph = problem.sub_graphs[0];
 auto &color_problem = this->problem->color_problem;
 auto &color_enactor = this->color_enactor;
 GUARD_CU(color_problem.Init(graph, target));
@@ -453,7 +441,15 @@ for (int i = 0; i < NUM_STREAM - 1; i++)
 for (int i = 0; i < NUM_STREAM; i++) 
 	printf("Frontier %d has length %d \n", i, lengths[i]);
 
-// Initialize frontiers - Do on host since captured is on host, change to device if needed
+// Init frontiers
+for (int i = 0; i < NUM_STREAM; i++) {
+        GUARD_CU(this->frontiers[i].Init(2, NULL, std::to_string(i), util::DEVICE));
+        util::GRError(cudaStreamCreate(&(this->streams[i])),
+                "cudaStreamCreate failed.", __FILE__, __LINE__);
+}
+
+// Alloc and populate frontiers
+GUARD_CU(util::SetDevice(this -> gpu_idx[0]));
 for (int i = 0; i < NUM_STREAM; i++) {
         this->frontiers[i].Allocate(
         lengths[i] ,graph.edges ,this->queue_factors);
@@ -462,7 +458,7 @@ for (int i = 0; i < NUM_STREAM; i++) {
 	VertexT * start_address = captured_start_addresses[i]; 
 	GUARD_CU(this->frontiers[i].V_Q()->ForAll([start_address]
 		 __host__ __device__ (VertexT * v_q, const SizeT & pos) 
-		{auto  test = start_address[pos];},
+		{v_q[pos] = start_address[pos];},
 		this->frontiers[i].queue_length, util::DEVICE, streams[i]));
 	GUARD_CU(cudaDeviceSynchronize());;
 }
