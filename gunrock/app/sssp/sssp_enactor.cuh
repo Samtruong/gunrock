@@ -141,27 +141,50 @@ struct SSSPIterationLoop : public IterationLoopBase
             return true;
         };
 
+// Multi-stream Call
+for (int i = 0; i < NUM_STREAM; i++) {
         oprtr_parameters.label = iteration + 1;
+	oprtr_parameters.stream = streams[i];
+	auto frontier = frontiers[i];
         // Call the advance operator, using the advance operation
         GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
             graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
             oprtr_parameters, advance_op, filter_op));
+}
+for (int i = 0; i < NUM_STREAM; i++) {
+ GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
+}
 
         if (oprtr_parameters.advance_mode != "LB_CULL" &&
             oprtr_parameters.advance_mode != "LB_LIGHT_CULL")
         {
+
+// Multi-stream Call
+for (int i = 0; i < NUM_STREAM; i++) {
+	    oprtr_parameters.stream = streams[i];
+	    auto frontier = frontiers[i];
             frontier.queue_reset = false;
             // Call the filter operator, using the filter operation
             GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
                 graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
                 oprtr_parameters, filter_op));
+}
+for (int i = 0; i < NUM_STREAM; i++) {
+ GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
+}
         }
 
+// Multi-stream Call
+for (int i = 0; i < NUM_STREAM; i++) {
         // Get back the resulted frontier length
+	auto frontier = frontiers[i];
         GUARD_CU(frontier.work_progress.GetQueueLength(
             frontier.queue_index, frontier.queue_length,
-            false, oprtr_parameters.stream, true));
-
+            false, streams[i], true));
+}
+for (int i = 0; i < NUM_STREAM; i++) {
+ GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
+}
         return retval;
     }
 
@@ -386,10 +409,6 @@ GUARD_CU(cudaDeviceSynchronize());
 printf("Reset color enactor and enact \n");
 GUARD_CU(color_enactor.Enact());
 GUARD_CU(cudaDeviceSynchronize());
-cpu_timer.Stop();
-
-//Report
-printf("Total coloring time: %f ms \n", cpu_timer.ElapsedMillis());
 
 //Report colors
 printf("Get partitioned graph into frontiers\n");
@@ -462,6 +481,10 @@ for (int i = 0; i < NUM_STREAM; i++) {
 		this->frontiers[i].queue_length, util::DEVICE, streams[i]));
 	GUARD_CU(cudaDeviceSynchronize());;
 }
+
+cpu_timer.Stop();
+// Report
+printf("Total init and color time: %f ms \n", cpu_timer.ElapsedMillis());
 
        return retval;
 }
