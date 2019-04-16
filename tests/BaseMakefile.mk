@@ -12,6 +12,7 @@
 force64 = 1
 use_metis = 1
 use_boost = 0
+maxregisters = 32
 NVCC = "$(shell which nvcc)"
 NVCC_VERSION = $(strip $(shell nvcc --version | grep release | sed 's/.*release //' |  sed 's/,.*//'))
 

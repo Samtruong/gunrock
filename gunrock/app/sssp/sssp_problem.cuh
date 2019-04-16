@@ -243,20 +243,19 @@ ColorProblem color_problem;
     cudaError_t Release(util::Location target = util::LOCATION_ALL)
     {
         cudaError_t retval = cudaSuccess;
+// Graph Coloring Sepcific - release
+GUARD_CU(color_problem.Release(target));
+
         if (data_slices == NULL) return retval;
-        for (int i = 0; i < this->num_gpus; i++) {
+        for (int i = 0; i < this->num_gpus; i++) 
             GUARD_CU(data_slices[i].Release(target));
-// Graph Coloring Specific - release
-GUARD_CU(color_problem.data_slices[i].Release(target));
-	}
+	
         if ((target & util::HOST) != 0 &&
             data_slices[0].GetPointer(util::DEVICE) == NULL)
         {
             delete[] data_slices; data_slices=NULL;
         }
         GUARD_CU(BaseProblem::Release(target));
-// Graph Coloring Sepcific - release
-GUARD_CU(color_problem.Release(target));
         return retval;
     }
 
@@ -369,7 +368,7 @@ GUARD_CU(color_problem.Release(target));
         data_slices = new util::Array1D<SizeT, DataSlice>[this->num_gpus];
 	
 // Graph Coloring Specific - init
-GUARD_CU(color_problem.Init(graph, target));
+// GUARD_CU(color_problem.Init(graph, target));
 
         if (this -> parameters.template Get<bool>("mark-pred"))
             this -> flag = this -> flag | Mark_Predecessors;
