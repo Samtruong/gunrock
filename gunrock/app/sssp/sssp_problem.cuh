@@ -84,6 +84,8 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
         util::Array1D<SizeT, VertexT>    preds      ; // predecessors of vertices
         util::Array1D<SizeT, VertexT>    temp_preds ; // predecessors of vertices
 
+	bool color_in;	
+
         /*
          * @brief Default constructor
          */
@@ -132,13 +134,17 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
          * \return    cudaError_t Error message(s), if any
          */
         cudaError_t Init(
+	    bool color_in_,
             GraphT        &sub_graph,
             int            num_gpus = 1,
             int            gpu_idx = 0,
             util::Location target  = util::DEVICE,
-            ProblemFlag    flag    = Problem_None)
+            ProblemFlag    flag    = Problem_None
+	    )
         {
             cudaError_t retval  = cudaSuccess;
+		
+	    color_in = color_in_;
 
             GUARD_CU(BaseDataSlice::Init(
                 sub_graph, num_gpus, gpu_idx, target, flag));
@@ -208,6 +214,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
     // Members
     // Set of data slices (one for each GPU)
     util::Array1D<SizeT, DataSlice> *data_slices;
+    bool color_in;    
 
 // Graph Coloring Specific - attributes
 typedef color::Problem<GraphT, FLAG> ColorProblem;
@@ -225,6 +232,7 @@ ColorProblem color_problem;
 	color_problem(_parameters, _flag),
         data_slices(NULL)
     {
+	color_in = _parameters.Get<bool>("color-in");
     }
 
     /**
@@ -382,7 +390,7 @@ GUARD_CU(color_problem.Release(target));
             GUARD_CU(data_slices[gpu].Allocate(1, target | util::HOST));
 
             auto &data_slice = data_slices[gpu][0];
-            GUARD_CU(data_slice.Init(this -> sub_graphs[gpu],
+            GUARD_CU(data_slice.Init(this -> color_in, this -> sub_graphs[gpu],
                 this -> num_gpus, this -> gpu_idx[gpu], target, this -> flag));
         } // end for (gpu)
 

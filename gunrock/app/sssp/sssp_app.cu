@@ -36,6 +36,13 @@ cudaError_t UseParameters(util::Parameters &parameters)
     GUARD_CU(UseParameters_problem(parameters));
     GUARD_CU(UseParameters_enactor(parameters));
 
+    GUARD_CU(parameters.Use<bool>(
+        "color-in",
+        util::REQUIRED_ARGUMENT | util::OPTIONAL_PARAMETER,
+        false,
+        "Apply coloring at only first input frontier\n (default=false)",
+        __FILE__, __LINE__));
+
     GUARD_CU(parameters.Use<std::string>(
         "src",
         util::REQUIRED_ARGUMENT | util::MULTI_VALUE | util::OPTIONAL_PARAMETER,

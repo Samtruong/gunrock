@@ -16,13 +16,14 @@ echo "[4] Run dblp dataset"
 echo "[5] Run twitter dataset"
 read -p "Option: " set
 
+echo "Coloring on input frontier? (default=false color output frontier)"
+read -p "Option: " inputfrontier
 ./bin/test_sssp_10.0_x86_64 \
 --graph-type=market \
 --graph-file=${ADDR_ARRAY[$set]} \
 --src=largestdegree \
 --device=0 \
---queue-sizing=1 \
---in-sizing=1 \
 --traversal-mode=LB \
 --quick \
---num-run=100
+--color-in=$inputfrontier
+#--num-run=10
