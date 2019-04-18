@@ -95,7 +95,7 @@ struct SSSPIterationLoop : public IterationLoopBase
         //auto         &row_offsets        =   graph.CsrT::row_offsets;
         auto         &weights            =   graph.CsrT::edge_values;
         auto         &original_vertex    =   graph.GpT::original_vertex;
-        auto         &frontier           =   enactor_slice.frontier;
+        //auto         &frontier           =   enactor_slice.frontier;
         auto         &oprtr_parameters   =   enactor_slice.oprtr_parameters;
         auto         &retval             =   enactor_stats.retval;
         //auto         &stream             =   enactor_slice.stream;
@@ -104,7 +104,6 @@ struct SSSPIterationLoop : public IterationLoopBase
 
 // Coloring at input implementation
 if (color_in){
-		printf( "DEBUG: Colored input frontier \n");
 	        // The advance operation
 	        auto advance_op = [distances, weights, original_vertex, preds]
 	        __host__ __device__ (
@@ -115,7 +114,7 @@ if (color_in){
 	            ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
 	            ValueT edge_weight  = Load<cub::LOAD_CS>(weights + edge_id);
 	            ValueT new_distance = src_distance + edge_weight;
-	
+			if (src == 0) {printf("HERE\n");}	
 	            // Check if the destination node has been claimed as someone's child
 	            ValueT old_distance = atomicMin(distances + dest, new_distance);
 	
@@ -150,12 +149,15 @@ if (color_in){
 	        oprtr_parameters.label = iteration + 1;
 		oprtr_parameters.stream = streams[i];
 		auto frontier = frontiers[i];
+		if (frontier.queue_length == 0) continue;
 	        // Call the advance operator, using the advance operation
 	        GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
 	            graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
 	            oprtr_parameters, advance_op, filter_op));
 	}
 	for (int i = 0; i < NUM_STREAM; i++) {
+	 auto frontier = frontiers[i];
+	 if (frontier.queue_length == 0) continue;
 	 GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
 	}
 	
@@ -167,6 +169,7 @@ if (color_in){
 	for (int i = 0; i < NUM_STREAM; i++) {
 		    oprtr_parameters.stream = streams[i];
 		    auto frontier = frontiers[i];
+		    if (frontier.queue_length == 0) continue;
 	            frontier.queue_reset = false;
 	            // Call the filter operator, using the filter operation
 	            GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
@@ -174,25 +177,26 @@ if (color_in){
 	                oprtr_parameters, filter_op));
 	}
 	for (int i = 0; i < NUM_STREAM; i++) {
+	 auto frontier = frontiers[i];
+	 if (frontier.queue_length == 0) continue;
 	 GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
 	}
 	        }
 	
 	// Multi-stream Call
 	for (int i = 0; i < NUM_STREAM; i++) {
-	        // Get back the resulted frontier length
 		auto frontier = frontiers[i];
+		// if (frontier.queue_length == 0) continue;
+	        // Get back the resulted frontier length
 	        GUARD_CU(frontier.work_progress.GetQueueLength(
 	            frontier.queue_index, frontier.queue_length,
-	            false, streams[i], true));
+	            false, streams[i], false));
 	}
-	for (int i = 0; i < NUM_STREAM; i++) {
-	 GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
-	}
-	}
+    }
 
 // if coloring at the output frontier
 else{
+	auto         &frontier           =   enactor_slice.frontier;
 	//The advance operation
         auto advance_op = [distances, weights, original_vertex, preds]
         __host__ __device__ (
@@ -258,20 +262,20 @@ else{
         return retval;
     }
 
-//bool Stop_Condition(int gpu_num = 0) {
-//    auto &enactor_slices = this->enactor->enactor_slices;
-//    auto iteration = enactor_slices[0].enactor_stats.iteration;
-//    auto frontiers = this->enactor->frontiers;
-//
-//    // Make sure there is no infinite loop - Disable if needed
-//    if (iteration >= 1000) return true;
-//    
-//    bool continue_predicate = false;
-//    for (int i = 0; i < NUM_STREAM; i++) {
-//	if (frontiers[i].queue_length != 0) {continue_predicate += true; break;}
-//    }
-//    return (! continue_predicate);
-//}
+bool Stop_Condition(int gpu_num = 0) {
+    auto &enactor_slices = this->enactor->enactor_slices;
+    auto iteration = enactor_slices[0].enactor_stats.iteration;
+    auto frontiers = this->enactor->frontiers;
+
+    // Make sure there is no infinite loop - Disable if needed
+    if (iteration >= 1000) return true;
+    
+    bool continue_predicate = false;
+    for (int i = 0; i < NUM_STREAM; i++) {
+	if (frontiers[i].queue_length != 0) {continue_predicate += true; break;}
+    }
+    return (! continue_predicate);
+}
 
     /**
      * @brief Routine to combine received data and local data
@@ -606,16 +610,22 @@ if (this->color_in) {
 	        this->frontiers[i].Allocate(
 	        lengths[i] ,graph.edges ,this->queue_factors);
 	        GUARD_CU(cudaDeviceSynchronize());
-	
-	        VertexT * start_address = captured_start_addresses[i];
-	        GUARD_CU(this->frontiers[i].V_Q()->ForAll([start_address]
-	                 __host__ __device__ (VertexT * v_q, const SizeT & pos)
-	                {v_q[pos] = start_address[pos];},
-	                this->frontiers[i].queue_length, util::DEVICE, streams[i]));
-	        GUARD_CU(cudaDeviceSynchronize());;
+
+		this->frontiers[i].queue_length = lengths[i];	
+		
+		util::Array1D<SizeT, VertexT> tmp;
+		tmp.Allocate(lengths[i], util::DEVICE | util::HOST);
+		for (SizeT j = 0; j < lengths[i]; j++) {
+			tmp[j] = (VertexT) captured_start_addresses[i][j];
+		}	
+		GUARD_CU(tmp.Move(util::HOST, util::DEVICE));
+		GUARD_CU(this->frontiers[i].V_Q()->ForEach(
+			tmp,
+			[] __host__ __device__ (VertexT & v, VertexT & i) { v = i;},
+			lengths[i], util::DEVICE, 0));
+		tmp.Release();
 	}
 	
-	printf("Done Reseting frontiers \n");
 }
 	for (int gpu = 0; gpu < this->num_gpus; gpu++)
         {
