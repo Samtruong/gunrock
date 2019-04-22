@@ -118,8 +118,8 @@ if (color_in){
 	            ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
 	            ValueT edge_weight  = Load<cub::LOAD_CS>(weights + edge_id);
 	            ValueT new_distance = src_distance + edge_weight;
-			//printf("DEBUG: Path's source is %d \n", path_src);
-			//if (src == path_src) {printf("DEBUG: Source node is found in frontier %d\n", stream_id);}	
+			printf("DEBUG: Path's source is %d \n", path_src);
+			if (src == path_src) {printf("DEBUG: Source node is found in frontier %d\n", stream_id);}	
 	            // Check if the destination node has been claimed as someone's child
 	            ValueT old_distance = atomicMin(distances + dest, new_distance);
 	
@@ -580,19 +580,23 @@ if (this->color_in) {
 	thrust::sort_by_key(thrust::host, colors, colors + graph.nodes, tokens);
 
 	//DEBUG
-	for (int i = 0; i < graph.nodes; i++)
-		printf("Ascending color: %d \n", colors[i]);
+	//for (int i = 0; i < graph.nodes; i++)
+	//	printf("Ascending color: %d \n", colors[i]);
 
 	//Find the top @NUM_STREAM colors
-	thrust::reduce_by_key(
+	thrust::pair<VertexT*, int*> new_end;
+	new_end = thrust::reduce_by_key(
 		thrust::host, colors, colors + graph.nodes, tokens, pallette, frequencies);
+
 	//DEBUG
-	//for (int i = 0; i < graph.nodes; i++) 
+	//for (int i = 0; i < 160; i++) 
 	//	printf("pallette[%d] = %d, freq[%d] = %d\n",i, pallette[i], i, frequencies[i]); 
 	
 
 	//Sort colors by frequencies
-	thrust::sort_by_key(thrust::host, frequencies, frequencies + graph.nodes, pallette);
+	int num_colors = new_end.first - pallette;
+	thrust::sort_by_key(
+	thrust::host, frequencies, frequencies + num_colors, pallette, thrust::greater<int>());
 
 	//Report top colors
 	for (int i = 0; i < NUM_STREAM; i++)
@@ -606,13 +610,13 @@ if (this->color_in) {
 		// the last frontier has multiple colors
 		if (i == NUM_STREAM - 1) {
 			lengths[i] = thrust::reduce(
-			thrust::host, &(frequencies[i]), &(frequencies[i]) + (graph.nodes - sum));
+			thrust::host, &(frequencies[i]), &(frequencies[i]) + (num_colors - sum));
 			break; 
 		}
 		// the first @NUM_STREAM frontiers have 1 color each
 		else {
 			lengths[i] = frequencies[i];
-			sum +=  lengths[i];
+			sum +=  1;
 		}
 	}
 	
@@ -637,6 +641,8 @@ if (this->color_in) {
 	//Find nodes with the top color and put in sorted_id
 	int offset = 0;
 	for (int i = 0; i < NUM_STREAM - 1; i++) {
+		//DEBUG
+		printf("Copying color %d \n", i);
 		auto pred_color = pallette[i];
 		auto lambda = [colors, pred_color] __host__ __device__ (const VertexT v)
 		{
@@ -647,6 +653,8 @@ if (this->color_in) {
 		thrust::copy_if(thrust::host, id, id + graph.nodes, sorted_id + offset, lambda); 
 	}
 
+	//DEBUG
+	printf("Copying last color \n");
 	//Put the rest of the nodes in sorted_id
 	auto lambda = [colors, pallette] __host__ __device__ (const VertexT v)
 	{
@@ -656,20 +664,26 @@ if (this->color_in) {
 		}
 		return true;
 	};
-	offset += lengths[NUM_STREAM - 1];
+	offset += lengths[NUM_STREAM - 2];
 	thrust::copy_if(thrust::host, id, id + graph.nodes, sorted_id + offset, lambda);
 
+	//DEBUG
+	printf("All nodes has been moved and ready to populate frontier \n");
 	//Intermediate variables, not used after this point	
 	delete [] pallette;
 	delete [] tokens;
 	delete [] frequencies;
 	delete [] colors;
 	delete [] id;
-
+	
+	//DEBUG
+	printf("All intermediate values are deleted \n");
 	// Alloc and populate frontiers
 	GUARD_CU(util::SetDevice(this -> gpu_idx[0]));
 	offset = 0;
 	for (int i = 0; i < NUM_STREAM; i++) {
+		//DEBUG
+		printf("Populating frontier %d \n", i);
 		if (i != 0)
 			offset += lengths[i-1];
 	        this->frontiers[i].Allocate(
@@ -682,7 +696,6 @@ if (this->color_in) {
 		tmp.Allocate(lengths[i], util::DEVICE | util::HOST);
 		for (SizeT j = 0; j < lengths[i]; j++) {
 			tmp[j] = (VertexT) (sorted_id + offset)[j];
-			if (tmp[j] == this->path_src) printf("DEBUG: Path's source found in Reset\n");
 		}	
 		GUARD_CU(tmp.Move(util::HOST, util::DEVICE));
 		GUARD_CU(this->frontiers[i].V_Q()->ForEach(
@@ -692,6 +705,7 @@ if (this->color_in) {
 		tmp.Release();
 	}
 	
+	delete [] sorted_id;	
 }
 	for (int gpu = 0; gpu < this->num_gpus; gpu++)
         {
