@@ -102,10 +102,14 @@ struct SSSPIterationLoop : public IterationLoopBase
         auto         &iteration          =   enactor_stats.iteration;
 	auto &color_in                   = data_slice.color_in;
 
+	//DEBUG
+	auto path_src = this->enactor->path_src;
+	int stream_id = -1;
+
 // Coloring at input implementation
 if (color_in){
 	        // The advance operation
-	        auto advance_op = [distances, weights, original_vertex, preds]
+	        auto advance_op = [distances, weights, original_vertex, preds, path_src, stream_id]
 	        __host__ __device__ (
 	            const VertexT &src, VertexT &dest, const SizeT &edge_id,
 	            const VertexT &input_item, const SizeT &input_pos,
@@ -114,7 +118,8 @@ if (color_in){
 	            ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
 	            ValueT edge_weight  = Load<cub::LOAD_CS>(weights + edge_id);
 	            ValueT new_distance = src_distance + edge_weight;
-			if (src == 0) {printf("HERE\n");}	
+			//printf("DEBUG: Path's source is %d \n", path_src);
+			//if (src == path_src) {printf("DEBUG: Source node is found in frontier %d\n", stream_id);}	
 	            // Check if the destination node has been claimed as someone's child
 	            ValueT old_distance = atomicMin(distances + dest, new_distance);
 	
@@ -145,10 +150,12 @@ if (color_in){
 	        };
 	
 	// Multi-stream Call
+	//printf("DEBUG: Launch Advance Op \n");
 	for (int i = 0; i < NUM_STREAM; i++) {
 	        oprtr_parameters.label = iteration + 1;
 		oprtr_parameters.stream = streams[i];
 		auto frontier = frontiers[i];
+		stream_id = i;
 		if (frontier.queue_length == 0) continue;
 	        // Call the advance operator, using the advance operation
 	        GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
@@ -166,6 +173,7 @@ if (color_in){
 	        {
 	
 	// Multi-stream Call
+	//printf("DEBUG: Launch Filer Op \n");
 	for (int i = 0; i < NUM_STREAM; i++) {
 		    oprtr_parameters.stream = streams[i];
 		    auto frontier = frontiers[i];
@@ -184,6 +192,7 @@ if (color_in){
 	        }
 	
 	// Multi-stream Call
+	//printf("DEBUG: Update Queue Length \n");
 	for (int i = 0; i < NUM_STREAM; i++) {
 		auto frontier = frontiers[i];
 		// if (frontier.queue_length == 0) continue;
@@ -367,6 +376,9 @@ cudaStream_t* streams = new cudaStream_t[NUM_STREAM];
 typedef color::Problem<GraphT> ColorProblemT;
 typedef color::Enactor<ColorProblemT> ColorEnactorT;
 ColorEnactorT color_enactor;
+
+//DEBUG
+VertexT path_src;
 
     // Members
     Problem     *problem   ;
@@ -558,40 +570,51 @@ if (this->color_in) {
 	printf("]\n");
 	
 	//Sort independent sets
-	VertexT * vertex_ids = new VertexT[graph.nodes];
-	VertexT ** captured_start_addresses = new VertexT*[NUM_STREAM];
+	int * tokens        = new int[graph.nodes];
+	int * frequencies   = new int[graph.nodes];
+	VertexT * pallette  = new VertexT[graph.nodes];
 	
-	#pragma omp parallel for
+	thrust::fill(thrust::host, tokens, tokens + graph.nodes, 1);	
+
+	//tokens is dummy vector for sort, sort colors by ascending order
+	thrust::sort_by_key(thrust::host, colors, colors + graph.nodes, tokens);
+
+	//DEBUG
 	for (int i = 0; i < graph.nodes; i++)
-	        vertex_ids[i] = i;
+		printf("Ascending color: %d \n", colors[i]);
+
+	//Find the top @NUM_STREAM colors
+	thrust::reduce_by_key(
+		thrust::host, colors, colors + graph.nodes, tokens, pallette, frequencies);
+	//DEBUG
+	//for (int i = 0; i < graph.nodes; i++) 
+	//	printf("pallette[%d] = %d, freq[%d] = %d\n",i, pallette[i], i, frequencies[i]); 
 	
-	thrust::sort_by_key(thrust::host, colors, colors + graph.nodes - 1, vertex_ids);
-	
-	//Find length of each set
+
+	//Sort colors by frequencies
+	thrust::sort_by_key(thrust::host, frequencies, frequencies + graph.nodes, pallette);
+
+	//Report top colors
+	for (int i = 0; i < NUM_STREAM; i++)
+		printf("The %d color is %d \n", i, pallette[i]);
+
+	//Find length of each frontier
 	int * lengths = new int[NUM_STREAM];
-	VertexT color = colors[0];
-	int pos = 0;
-	int count = 0;
 	int sum = 0;
-	for (int i = 0; i < graph.nodes; i++) {
-	        if (color != colors[i]) {
-	                lengths[pos] = count;
-	                count = 0;
-	                color = colors[i];
-	                pos ++;
-	        }
-	        if (pos == NUM_STREAM - 1) {
-	                lengths[pos] = graph.nodes - sum;
-	                break;
-	        }
-	        count ++;
-	        sum ++;
+	for (int i = 0; i < NUM_STREAM; i++) {
+		
+		// the last frontier has multiple colors
+		if (i == NUM_STREAM - 1) {
+			lengths[i] = thrust::reduce(
+			thrust::host, &(frequencies[i]), &(frequencies[i]) + (graph.nodes - sum));
+			break; 
+		}
+		// the first @NUM_STREAM frontiers have 1 color each
+		else {
+			lengths[i] = frequencies[i];
+			sum +=  lengths[i];
+		}
 	}
-	
-	//Get starting point for every frontier
-	captured_start_addresses[0] = vertex_ids;
-	for (int i = 0; i < NUM_STREAM - 1; i++)
-	        captured_start_addresses[i + 1] = captured_start_addresses[i] + lengths[i];
 	
 	//Report size of frontiers
 	for (int i = 0; i < NUM_STREAM; i++)
@@ -603,10 +626,52 @@ if (this->color_in) {
 	        util::GRError(cudaStreamCreate(&(this->streams[i])),
 	                "cudaStreamCreate failed.", __FILE__, __LINE__);
 	}
-	
+
+	//Create sorted id list to populate frontiers;
+	VertexT * id        = new VertexT[graph.nodes];
+	VertexT * sorted_id = new VertexT[graph.nodes];
+	# pragma omp parallel for
+	for (int i = 0; i < graph.nodes; i++)
+		id[i] = i;
+
+	//Find nodes with the top color and put in sorted_id
+	int offset = 0;
+	for (int i = 0; i < NUM_STREAM - 1; i++) {
+		auto pred_color = pallette[i];
+		auto lambda = [colors, pred_color] __host__ __device__ (const VertexT v)
+		{
+			return colors[v] == pred_color;
+		};
+		if (i != 0)
+			offset += lengths[i-1];
+		thrust::copy_if(thrust::host, id, id + graph.nodes, sorted_id + offset, lambda); 
+	}
+
+	//Put the rest of the nodes in sorted_id
+	auto lambda = [colors, pallette] __host__ __device__ (const VertexT v)
+	{
+		for (int i = 0; i < NUM_STREAM - 1; i++) {
+			if (colors[v] == pallette[i])
+				return false;
+		}
+		return true;
+	};
+	offset += lengths[NUM_STREAM - 1];
+	thrust::copy_if(thrust::host, id, id + graph.nodes, sorted_id + offset, lambda);
+
+	//Intermediate variables, not used after this point	
+	delete [] pallette;
+	delete [] tokens;
+	delete [] frequencies;
+	delete [] colors;
+	delete [] id;
+
 	// Alloc and populate frontiers
 	GUARD_CU(util::SetDevice(this -> gpu_idx[0]));
+	offset = 0;
 	for (int i = 0; i < NUM_STREAM; i++) {
+		if (i != 0)
+			offset += lengths[i-1];
 	        this->frontiers[i].Allocate(
 	        lengths[i] ,graph.edges ,this->queue_factors);
 	        GUARD_CU(cudaDeviceSynchronize());
@@ -616,7 +681,8 @@ if (this->color_in) {
 		util::Array1D<SizeT, VertexT> tmp;
 		tmp.Allocate(lengths[i], util::DEVICE | util::HOST);
 		for (SizeT j = 0; j < lengths[i]; j++) {
-			tmp[j] = (VertexT) captured_start_addresses[i][j];
+			tmp[j] = (VertexT) (sorted_id + offset)[j];
+			if (tmp[j] == this->path_src) printf("DEBUG: Path's source found in Reset\n");
 		}	
 		GUARD_CU(tmp.Move(util::HOST, util::DEVICE));
 		GUARD_CU(this->frontiers[i].V_Q()->ForEach(
@@ -683,6 +749,7 @@ if (this->color_in) {
      */
     cudaError_t Enact(VertexT src)
     {
+	this->path_src = src;
         cudaError_t  retval     = cudaSuccess;
         GUARD_CU(this -> Run_Threads(this));
         util::PrintMsg("GPU SSSP Done.", this -> flag & Debug);
