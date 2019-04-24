@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <thrust/execution_policy.h>
 #include <thrust/sort.h>
+#include <moderngpu.cuh>
 #define NUM_STREAM 5
 
 // Graph Coloring Specific - Include
@@ -78,11 +79,12 @@ struct SSSPIterationLoop : public IterationLoopBase
      */
     cudaError_t Core(int peer_ = 0)
     {
-
-	// printf("Perform Core ...\n");
+	//DEBUG
+	printf("Executing Core ...\n");
         // Data sssp that works on
-	auto frontiers = this->enactor->frontiers;
-	auto streams = this->enactor->streams;
+	auto & contexts = this->enactor->contexts;
+	auto & frontiers = this->enactor->frontiers;
+	auto & streams = this->enactor->streams;
         auto         &data_slice         =   this -> enactor ->
             problem -> data_slices[this -> gpu_num][0];
         auto         &enactor_slice      =   this -> enactor ->
@@ -95,21 +97,25 @@ struct SSSPIterationLoop : public IterationLoopBase
         //auto         &row_offsets        =   graph.CsrT::row_offsets;
         auto         &weights            =   graph.CsrT::edge_values;
         auto         &original_vertex    =   graph.GpT::original_vertex;
-        //auto         &frontier           =   enactor_slice.frontier;
+        auto         &frontier0          =   enactor_slice.frontier;
         auto         &oprtr_parameters   =   enactor_slice.oprtr_parameters;
         auto         &retval             =   enactor_stats.retval;
         //auto         &stream             =   enactor_slice.stream;
         auto         &iteration          =   enactor_stats.iteration;
 	auto &color_in                   = data_slice.color_in;
 
-	//DEBUG
-	auto path_src = this->enactor->path_src;
-	int stream_id = -1;
-
 // Coloring at input implementation
 if (color_in){
+	
+		//This should not be timed in Core, should be implemented in enactor_loop
+		//for (int i = 0; i < NUM_STREAM; i++){
+		//	auto &frontier = frontiers[i];
+		//	frontier.queue_reset = true;
+		//	frontier.queue_index += 1; 
+		//}
+
 	        // The advance operation
-	        auto advance_op = [distances, weights, original_vertex, preds, path_src, stream_id]
+	        auto advance_op = [distances, weights, original_vertex, preds]
 	        __host__ __device__ (
 	            const VertexT &src, VertexT &dest, const SizeT &edge_id,
 	            const VertexT &input_item, const SizeT &input_pos,
@@ -118,8 +124,6 @@ if (color_in){
 	            ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
 	            ValueT edge_weight  = Load<cub::LOAD_CS>(weights + edge_id);
 	            ValueT new_distance = src_distance + edge_weight;
-			printf("DEBUG: Path's source is %d \n", path_src);
-			if (src == path_src) {printf("DEBUG: Source node is found in frontier %d\n", stream_id);}	
 	            // Check if the destination node has been claimed as someone's child
 	            ValueT old_distance = atomicMin(distances + dest, new_distance);
 	
@@ -148,64 +152,85 @@ if (color_in){
 	            labels[dest] = iteration;
 	            return true;
 	        };
+
+	 //DEBUG
+	 for (int i = 0; i < NUM_STREAM; i++) {
+                auto & frontier = frontiers[i];
+               	printf("Before iteration %d, frontier %d has  length %d \n", iteration, i, frontier.queue_length);
+        }
 	
 	// Multi-stream Call
-	//printf("DEBUG: Launch Advance Op \n");
+	printf("DEBUG: Launch Advance Op \n");
 	for (int i = 0; i < NUM_STREAM; i++) {
 	        oprtr_parameters.label = iteration + 1;
 		oprtr_parameters.stream = streams[i];
-		auto frontier = frontiers[i];
-		stream_id = i;
-		if (frontier.queue_length == 0) continue;
+		auto & frontier = frontiers[i];
+		oprtr_parameters.frontier = & frontier;
+		oprtr_parameters.context  = contexts[i];
 	        // Call the advance operator, using the advance operation
 	        GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
 	            graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
 	            oprtr_parameters, advance_op, filter_op));
 	}
 	for (int i = 0; i < NUM_STREAM; i++) {
-	 auto frontier = frontiers[i];
-	 if (frontier.queue_length == 0) continue;
 	 GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
 	}
-	
-	        if (oprtr_parameters.advance_mode != "LB_CULL" &&
+
+    if (oprtr_parameters.advance_mode != "LB_CULL" &&
 	            oprtr_parameters.advance_mode != "LB_LIGHT_CULL")
-	        {
+    {
 	
 	// Multi-stream Call
-	//printf("DEBUG: Launch Filer Op \n");
+	printf("DEBUG: Launch Filer Op \n");
 	for (int i = 0; i < NUM_STREAM; i++) {
-		    oprtr_parameters.stream = streams[i];
-		    auto frontier = frontiers[i];
-		    if (frontier.queue_length == 0) continue;
-	            frontier.queue_reset = false;
-	            // Call the filter operator, using the filter operation
-	            GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
-	                graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
-	                oprtr_parameters, filter_op));
+		oprtr_parameters.stream = streams[i];
+		auto & frontier = frontiers[i];
+	        frontier.queue_reset = false;
+		//oprtr_parameters.frontier = &frontier;
+		//oprtr_parameters.context  = contexts[i];
+	        // Call the filter operator, using the filter operation
+	        GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
+	            graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
+	            oprtr_parameters, filter_op));
 	}
 	for (int i = 0; i < NUM_STREAM; i++) {
-	 auto frontier = frontiers[i];
-	 if (frontier.queue_length == 0) continue;
 	 GUARD_CU2(cudaStreamSynchronize(streams[i]), "cudaStreamSynchronize failed");
 	}
-	        }
-	
-	// Multi-stream Call
-	//printf("DEBUG: Update Queue Length \n");
+    }
+
+	//DEBUG
 	for (int i = 0; i < NUM_STREAM; i++) {
-		auto frontier = frontiers[i];
-		// if (frontier.queue_length == 0) continue;
+		auto & frontier = frontiers[i];
+		printf("At iteration %d, before cta the queue_index for frontier %d is %d \n", iteration, i, frontier.queue_index);
+	}
+	// Multi-stream Call
+	printf("DEBUG: Update Queue Length \n");
+	for (int i = 0; i < NUM_STREAM; i++) {
+		auto & frontier = frontiers[i];
 	        // Get back the resulted frontier length
 	        GUARD_CU(frontier.work_progress.GetQueueLength(
 	            frontier.queue_index, frontier.queue_length,
-	            false, streams[i], false));
+	            false, streams[i], true));
 	}
+
+        //DEBUG
+        for (int i = 0; i < NUM_STREAM; i++) {
+                auto & frontier = frontiers[i];
+                printf("At iteration %d, after cta the queue_index for frontier %d is %d \n", iteration, i, frontier.queue_index);
+        }
+
+
+        //DEBUG
+        for (int i = 0; i < NUM_STREAM; i++) {
+                auto & frontier = frontiers[i];
+                printf("After iteration %d, frontier %d has  length %d \n", iteration, i, frontier.queue_length);
+        }
+
     }
 
 // if coloring at the output frontier
 else{
-	auto         &frontier           =   enactor_slice.frontier;
+	auto & frontier = frontier0;
 	//The advance operation
         auto advance_op = [distances, weights, original_vertex, preds]
         __host__ __device__ (
@@ -272,18 +297,36 @@ else{
     }
 
 bool Stop_Condition(int gpu_num = 0) {
-    auto &enactor_slices = this->enactor->enactor_slices;
-    auto iteration = enactor_slices[0].enactor_stats.iteration;
-    auto frontiers = this->enactor->frontiers;
 
-    // Make sure there is no infinite loop - Disable if needed
-    if (iteration >= 1000) return true;
-    
-    bool continue_predicate = false;
-    for (int i = 0; i < NUM_STREAM; i++) {
-	if (frontiers[i].queue_length != 0) {continue_predicate += true; break;}
-    }
-    return (! continue_predicate);
+	auto &color_in = this->enactor->problem->data_slices[0][0].color_in;
+
+	if (color_in) {
+	    auto &enactor_slices = this->enactor->enactor_slices;
+	    auto & iteration = enactor_slices[0].enactor_stats.iteration;
+	    auto & frontiers = this->enactor->frontiers;
+	
+	    // Make sure there is no infinite loop - Disable if needed
+	    if (iteration >= 1000) return true;
+	    
+	    bool continue_predicate = false;
+	    for (int i = 0; i < NUM_STREAM; i++) {
+		if (frontiers[i].queue_length != 0) {
+			continue_predicate |= true; 
+			printf("Frontier %d still need to be processed \n",i);
+			break;
+		}
+	    }
+	    return (! continue_predicate);
+	}
+
+	else {
+		auto &frontier = this->enactor->enactor_slices[0].frontier;
+		if (frontier.queue_length == 0)
+			return true;
+		return false;
+	}
+
+
 }
 
     /**
@@ -299,6 +342,8 @@ bool Stop_Condition(int gpu_num = 0) {
         int NUM_VALUE__ASSOCIATES>
     cudaError_t ExpandIncoming(SizeT &received_length, int peer_)
     {
+	//DEBUG
+	printf("Executing Expand incoming ... \n");
 
         auto         &data_slice         =   this -> enactor ->
             problem -> data_slices[this -> gpu_num][0];
@@ -371,6 +416,7 @@ public:
 typedef Frontier<VertexT, SizeT, ARRAY_FLAG, cudaHostRegisterFlag> FrontierT;
 FrontierT * frontiers = new FrontierT [NUM_STREAM];
 cudaStream_t* streams = new cudaStream_t[NUM_STREAM];
+mgpu::ContextPtr * contexts = new mgpu::ContextPtr[NUM_STREAM];
 
 // Graph Coloring Specific - Public Attribute
 typedef color::Problem<GraphT> ColorProblemT;
@@ -629,6 +675,7 @@ if (this->color_in) {
 	        GUARD_CU(this->frontiers[i].Init(2, NULL, std::to_string(i), util::DEVICE));
 	        util::GRError(cudaStreamCreate(&(this->streams[i])),
 	                "cudaStreamCreate failed.", __FILE__, __LINE__);
+		this->contexts[i] = mgpu::CreateCudaDeviceAttachStream(0, this->streams[i]);
 	}
 
 	//Create sorted id list to populate frontiers;
