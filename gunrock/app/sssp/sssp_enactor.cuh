@@ -137,38 +137,36 @@ Multi-stream SSSP
         labels[dest] = iteration;
         return true;
       };
+
+      //The advance operation
+      auto advance_op =
+          [distances, weights, original_vertex, preds] __host__ __device__(
+              const VertexT &src, VertexT &dest, const SizeT &edge_id,
+              const VertexT &input_item, const SizeT &input_pos,
+              SizeT &output_pos) -> bool {
+        ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
+        ValueT edge_weight = Load<cub::LOAD_CS>(weights + edge_id);
+        ValueT new_distance = src_distance + edge_weight;
+        // Check if the destination node has been claimed as someone's child
+        ValueT old_distance = atomicMin(distances + dest, new_distance);
+
+        if (new_distance < old_distance) {
+          if (!preds.isEmpty()) {
+            VertexT pred = src;
+            if (!original_vertex.isEmpty()) pred = original_vertex[src];
+            Store(preds + dest, pred);
+          }
+          return true;
+        }
+        return false;
+      };
 /*==============================================================================
 Multi-stream Call Advance, distances and preds are different for each stream
 ==============================================================================*/
       printf("DEBUG: Launch Advance Op \n");
       for (int i = 0; i < NUM_STREAM; i++) {
 
-        //make array available on specific GPU stream
-        auto & distances_ = stream_distances[i];
-        auto & preds_ = stream_preds[i];
-
-        //The advance operation
-        auto advance_op =
-            [distances_, weights, original_vertex, preds_] __host__ __device__(
-                const VertexT &src, VertexT &dest, const SizeT &edge_id,
-                const VertexT &input_item, const SizeT &input_pos,
-                SizeT &output_pos) -> bool {
-          ValueT src_distance = Load<cub::LOAD_CG>(distances_ + src);
-          ValueT edge_weight = Load<cub::LOAD_CS>(weights + edge_id);
-          ValueT new_distance = src_distance + edge_weight;
-          // Check if the destination node has been claimed as someone's child
-          ValueT old_distance = atomicMin(distances_ + dest, new_distance);
-
-          if (new_distance < old_distance) {
-            if (!preds_.isEmpty()) {
-              VertexT pred = src;
-              if (!original_vertex.isEmpty()) pred = original_vertex[src];
-              Store(preds_ + dest, pred);
-            }
-            return true;
-          }
-          return false;
-        };
+        GUARD_CU(util::SetDevice(this->enactor->gpu_idx[0]));
 
         auto &oprtr_parameters = multistream_enactor_slices[i].oprtr_parameters;
         auto &frontier = multistream_enactor_slices[i].frontier;
@@ -177,17 +175,19 @@ Multi-stream Call Advance, distances and preds are different for each stream
 
         //DEBUG
         printf ("Launching kernel %d with stream %d\n",i, oprtr_parameters.stream);
+        printf ("Queue length is %d \n", frontier.queue_length);
+
         // Call the advance operator, using the advance operation
         GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
             graph.csr(), frontier.V_Q(), frontier.Next_V_Q(), oprtr_parameters,
             advance_op, filter_op));
       }
 
-      for (int i = 0; i < NUM_STREAM; i++) {
-        auto &stream = multistream_enactor_slices[i].stream;
-        GUARD_CU2(cudaStreamSynchronize(stream),
-                  "cudaStreamSynchronize failed");
-      }
+      // for (int i = 0; i < NUM_STREAM; i++) {
+      //   auto &stream = multistream_enactor_slices[i].stream;
+      //   GUARD_CU2(cudaStreamSynchronize(stream),
+      //             "cudaStreamSynchronize failed");
+      // }
 
       //!!! TODO Have to merge all distances and preds here before moving on.
 
@@ -217,11 +217,11 @@ Multi-stream Call Filter
               graph.csr(), frontier.V_Q(), frontier.Next_V_Q(),
               oprtr_parameters, filter_op));
         }
-        for (int i = 0; i < NUM_STREAM; i++) {
-          auto &stream = multistream_enactor_slices[i].stream;
-          GUARD_CU2(cudaStreamSynchronize(stream),
-                    "cudaStreamSynchronize failed");
-        }
+        // for (int i = 0; i < NUM_STREAM; i++) {
+        //   auto &stream = multistream_enactor_slices[i].stream;
+        //   GUARD_CU2(cudaStreamSynchronize(stream),
+        //             "cudaStreamSynchronize failed");
+        // }
       }
 
 /*==============================================================================
@@ -475,6 +475,22 @@ class Enactor
    */
   cudaError_t Release(util::Location target = util::LOCATION_ALL) {
     cudaError_t retval = cudaSuccess;
+
+    for (int i = 0; i < NUM_STREAM; i++) {
+      GUARD_CU(this->multistream_enactor_slices[i].Release(target));
+    }
+    GUARD_CU(this->multistream_enactor_slices.Release(target))
+
+    printf("Done releasing multistream \n");
+
+    // Graph Coloring Specific - Release
+    if (this->color_in) {
+      GUARD_CU(this->color_enactor.Release(target));
+      printf("Done releasing color enactor \n");
+      GUARD_CU(this->problem->color_problem.Release(target));
+      printf("Done releasing color problem \n");
+    }
+
     GUARD_CU(BaseEnactor::Release(target));
     delete[] iterations;
     iterations = NULL;
@@ -493,16 +509,6 @@ class Enactor
     //   }
     //   delete[] this->streams;
     // }
-    for (int i = 0; i < NUM_STREAM; i++) {
-      GUARD_CU(this->multistream_enactor_slices[i].Release(target));
-    }
-    GUARD_CU(this->multistream_enactor_slices.Release(target))
-
-    // Graph Coloring Specific - Release
-    if (this->color_in) {
-      GUARD_CU(this->color_enactor.Release(target));
-      GUARD_CU(this->problem->color_problem.Release(target));
-    }
     return retval;
   }
 
@@ -802,15 +808,24 @@ class Enactor
         // tmp.Release();
 
         auto &frontier = multistream_enactor_slices[i].frontier;
-        frontier.Allocate(lengths[i], graph.edges, this->queue_factors);
+        // frontier.Allocate(lengths[i], graph.edges, this->queue_factors);
+        frontier.Allocate(graph.nodes, graph.edges, this->queue_factors);
         GUARD_CU(cudaDeviceSynchronize());
 
         frontier.queue_length = lengths[i];
 
         util::Array1D<SizeT, VertexT> tmp;
-        tmp.Allocate(lengths[i], util::DEVICE | util::HOST);
-        for (SizeT j = 0; j < lengths[i]; j++) {
-          tmp[j] = (VertexT)(sorted_id + offset)[j];
+        // tmp.Allocate(lengths[i], util::DEVICE | util::HOST);
+        // for (SizeT j = 0; j < lengths[i]; j++) {
+        //   tmp[j] = (VertexT)(sorted_id + offset)[j];
+        // }
+
+        tmp.Allocate(graph.nodes, util::DEVICE | util::HOST);
+        for (SizeT j = 0; j < graph.nodes; j++) {
+          if (j < lengths[i])
+            tmp[j] = (VertexT)(sorted_id + offset)[j];
+          else
+            tmp[j] = util::PreDefinedValues<VertexT>::InvalidValue;
         }
         GUARD_CU(tmp.Move(util::HOST, util::DEVICE));
         GUARD_CU(frontier.V_Q()->ForEach(
