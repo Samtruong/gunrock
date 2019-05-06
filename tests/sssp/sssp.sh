@@ -21,9 +21,9 @@ read -p "Option: " inputfrontier
 ./bin/test_sssp_10.0_x86_64 \
 --graph-type=market \
 --graph-file=${ADDR_ARRAY[$set]} \
---src=largestdegree \
+--src=0 \
 --device=0 \
 --traversal-mode=LB \
 --quick \
---color-in=$inputfrontier
-#--num-run=10
+--color-in=$inputfrontier 
+#--num-run=1000
