@@ -84,6 +84,8 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
         util::Array1D<SizeT, VertexT>    preds      ; // predecessors of vertices
         util::Array1D<SizeT, VertexT>    temp_preds ; // predecessors of vertices
 
+        VertexT src;
+
 	bool color_in;	
 
         /*
@@ -423,7 +425,7 @@ GUARD_CU(color_problem.Release(target));
         VertexT src_;
         if (this->num_gpus <= 1)
         {
-            gpu = 0; src_=src;
+            gpu = 0; src_=src; this->data_slices[0]->src = src;
         } else {
             gpu = this -> org_graph -> partition_table[src];
             if (this -> flag & partitioner::Keep_Node_Num)
@@ -483,3 +485,4 @@ GUARD_CU(color_problem.Release(target));
 // mode:c++
 // c-file-style: "NVIDIA"
 // End:
+
