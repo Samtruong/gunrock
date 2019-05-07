@@ -114,7 +114,7 @@ struct SSSPIterationLoop
     auto &color_in = data_slice.color_in;
     auto &source = data_slice.src;
 /*==============================================================================
-Multi-stream SSSP
+Multi-stream SSSP with 1 time coloring during Reset()
 ==============================================================================*/
     if (color_in) {
 
@@ -161,18 +161,12 @@ Multi-stream SSSP
 /*==============================================================================
 Multi-stream Call Advance, distances and preds are different for each stream
 ==============================================================================*/
-      // printf("DEBUG: Launch Advance Op \n");
-
       for (int i = 0; i < num_stream; i++) {
 
         auto &oprtr_parameters = multistream_enactor_slices[i].oprtr_parameters;
         auto &frontier = multistream_enactor_slices[i].frontier;
         auto &stream = multistream_enactor_slices[i].stream;
         oprtr_parameters.label = iteration + 1;
-
-        //DEBUG
-        // printf ("Launching kernel %d with stream %d\n",i, oprtr_parameters.stream);
-        // printf ("Queue length is %d \n", frontier.queue_length);
 
         // Call the advance operator, using the advance operation
         GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
@@ -185,8 +179,6 @@ Multi-stream Call Advance, distances and preds are different for each stream
       //   GUARD_CU2(cudaStreamSynchronize(stream),
       //             "cudaStreamSynchronize failed");
       // }
-
-      //!!! TODO Have to merge all distances and preds here before moving on.
 
       auto & oprtr_parameters = multistream_enactor_slices[0].oprtr_parameters;
       if (oprtr_parameters.advance_mode != "LB_CULL" &&
@@ -226,82 +218,174 @@ Multi-stream Call queue update
             true));
       }
 
-      // DEBUG
-      // for (int i = 0; i < num_stream; i++) {
-      //   // auto &frontier = frontiers[i];
-      //   auto &frontier = multistream_enactor_slices[i].frontier;
-      //   printf("After iteration %d, frontier %d has  length %d \n", iteration,
-      //          i, frontier.queue_length);
-      // }
-
     }
 
 /*==============================================================================
-Normal SSSP
+ Multistreaming SSSP with dynamic coloring based on queue_length
 ==============================================================================*/
     else {
+
+      // If it is first iteration, take frontier from normal sssp
       auto &frontier = frontier0;
       auto &oprtr_parameters = oprtr_parameters0;
-      // The advance operation
-      auto advance_op =
-          [distances, weights, original_vertex, preds, iteration,source] __host__ __device__(
-              const VertexT &src, VertexT &dest, const SizeT &edge_id,
-              const VertexT &input_item, const SizeT &input_pos,
-              SizeT &output_pos) -> bool {
-        ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
-        ValueT edge_weight = Load<cub::LOAD_CS>(weights + edge_id);
-        ValueT new_distance = src_distance + edge_weight;
 
-        if (iteration == 0 && src != source)
-          return false;
-        // Check if the destination node has been claimed as someone's child
-        ValueT old_distance = atomicMin(distances + dest, new_distance);
+/*==============================================================================
+ Perform normal sssp if the queue_length is too small TODO: make threshold a parameter
+==============================================================================*/
+      if (frontier.queue_length <= graph.nodes / num_stream)	{
+    	  // The advance operation
+    	  auto advance_op =
+    	      [distances, weights, original_vertex, preds, iteration,source] __host__ __device__(
+    	          const VertexT &src, VertexT &dest, const SizeT &edge_id,
+    	          const VertexT &input_item, const SizeT &input_pos,
+    	          SizeT &output_pos) -> bool {
+    	    ValueT src_distance = Load<cub::LOAD_CG>(distances + src);
+    	    ValueT edge_weight = Load<cub::LOAD_CS>(weights + edge_id);
+    	    ValueT new_distance = src_distance + edge_weight;
 
-        // printf("max num = %d \n", util::PreDefinedValues<ValueT>::MaxValue);
+    	    if (iteration == 0 && src != source)
+    	      return false;
+    	    // Check if the destination node has been claimed as someone's child
+    	    ValueT old_distance = atomicMin(distances + dest, new_distance);
 
-        if (new_distance < old_distance) {
-         // if (!preds.isEmpty()) {
-         //   VertexT pred = src;
-         //   if (!original_vertex.isEmpty()) pred = original_vertex[src];
-         //   Store(preds + dest, pred);
-         // }
-          return true;
-        }
-        return false;
-      };
+    	    // printf("max num = %d \n", util::PreDefinedValues<ValueT>::MaxValue);
 
-      // The filter operation
-      auto filter_op = [labels, iteration] __host__ __device__(
-                           const VertexT &src, VertexT &dest,
-                           const SizeT &edge_id, const VertexT &input_item,
-                           const SizeT &input_pos, SizeT &output_pos) -> bool {
+    	    if (new_distance < old_distance) {
+    	     // if (!preds.isEmpty()) {
+    	     //   VertexT pred = src;
+    	     //   if (!original_vertex.isEmpty()) pred = original_vertex[src];
+    	     //   Store(preds + dest, pred);
+    	     // }
+    	      return true;
+    	    }
+    	    return false;
+    	  };
+
+    	  // The filter operation
+    	  auto filter_op = [labels, iteration] __host__ __device__(
+    	                       const VertexT &src, VertexT &dest,
+    	                       const SizeT &edge_id, const VertexT &input_item,
+    	                       const SizeT &input_pos, SizeT &output_pos) -> bool {
 
 
-        if (!util::isValid(dest)) return false;
-        if (labels[dest] == iteration) return false;
-        labels[dest] = iteration;
-        return true;
-      };
+    	    if (!util::isValid(dest)) return false;
+    	    if (labels[dest] == iteration) return false;
+    	    labels[dest] = iteration;
+    	    return true;
+    	  };
 
-      oprtr_parameters.label = iteration + 1;
-      // Call the advance operator, using the advance operation
-      GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
-          graph.csr(), frontier.V_Q(), frontier.Next_V_Q(), oprtr_parameters,
-          advance_op, filter_op));
+    	  oprtr_parameters.label = iteration + 1;
+    	  // Call the advance operator, using the advance operation
+    	  GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
+    	      graph.csr(), frontier.V_Q(), frontier.Next_V_Q(), oprtr_parameters,
+    	      advance_op, filter_op));
 
-      if (oprtr_parameters.advance_mode != "LB_CULL" &&
-          oprtr_parameters.advance_mode != "LB_LIGHT_CULL") {
-        frontier.queue_reset = false;
-        // Call the filter operator, using the filter operation
-        GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
-            graph.csr(), frontier.V_Q(), frontier.Next_V_Q(), oprtr_parameters,
-            filter_op));
-      }
+    	  if (oprtr_parameters.advance_mode != "LB_CULL" &&
+    	      oprtr_parameters.advance_mode != "LB_LIGHT_CULL") {
+    	    frontier.queue_reset = false;
+    	    // Call the filter operator, using the filter operation
+    	    GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
+    	        graph.csr(), frontier.V_Q(), frontier.Next_V_Q(), oprtr_parameters,
+    	        filter_op));
+    	  }
 
-      // Get back the resulted frontier length
-      GUARD_CU(frontier.work_progress.GetQueueLength(
-          frontier.queue_index, frontier.queue_length, false,
-          oprtr_parameters.stream, true));
+    	  // Get back the resulted frontier length
+    	  GUARD_CU(frontier.work_progress.GetQueueLength(
+    	      frontier.queue_index, frontier.queue_length, false,
+    	      oprtr_parameters.stream, true));
+    	} //end if frontier.queue_length >= threshold
+
+/*==============================================================================
+ Partition the frontier into multiple stream if frontier is too large
+==============================================================================*/
+	else {
+
+	    // create color array for frontier
+	    int color_iteration;
+	    util::Array1D<SizeT, VertexT> colors;
+	    colors.SetName("colors");
+	    colors.Allocate(frontier.queue_length, util::DEVICE);
+
+	    // create rand array for frontier
+	    util::Array1D<SizeT, float> rand;
+	    rand.SetName("rand");
+	    rand.Allocate(frontier.queue_length, util::DEVICE);
+	    curandGenerator_t gen;
+	    curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+	    //TODO make seed a parameter (seed = 0 now)
+	    curandSetPseudoRandomGeneratorSeed(gen, 0);
+	    curandGenerateUniform(gen, rand.GetPointer(util::DEVICE), frontier.queue_length);
+
+	    // create omit array
+	    util::Array1D<SizeT, bool>  omit;
+	    omit.SetName("omit");
+	    omit.Allocate(graph.nodes, util::DEVICE);	    
+
+	    // initialized omit (use stream 1) - this option only make sense with at least 2 streams
+            GUARD_CU(omit.ForEach(
+            [] __host__ __device__(bool & x){
+                x = false;
+            }, graph.nodes, util::DEVICE, multistream_enactor_slices[0].stream));
+
+	    // initialzed colors (use stream 2) - this option only make sense with at least 2 streams
+	    GUARD_CU(colors.ForEach(
+            [] __host__ __device__(VertexT & x) {
+                x = util::PreDefinedValues<VertexT>::InvalidValue;
+            }, frontier.queue_length, util::DEVICE, multistream_enactor_slices[1].stream));
+
+	    // define omit lambda (use stream 1) 
+	    auto omit_neighbor = [omit] __host__ __device__
+	    (VertexT * v_q, const SizeT &pos){
+		omit[v_q[pos]] = true;		
+	    };
+
+	    GUARD_CU2(cudaStreamSynchronize(multistream_enactor_slices[0].stream), "cudaStreamSynchronize failed");
+	    // populate omit array (use stream 1)
+	    GUARD_CU(frontier.V_Q()->ForAll(omit_neighbor, frontier.queue_length,
+					    util::DEVICE, multistream_enactor_slices[0].stream));
+
+	    // define fast coloring lambda
+            auto fast_coloring = [color_iteration, colors, rand, graph, omit] __host__ __device__
+            (VertexT * v_q, const SizeT &pos){
+		// pos is in order,  v_q[pos] is actual graph index
+		VertexT global_idx = v_q[pos];
+		if (util::isValid(colors[pos])) return;
+		SizeT start_edge = graph.CsrT::GetNeighborListOffset(global_idx);
+		SizeT num_neighbors = graph.CsrT::GetNeighborListLength(global_idx);
+
+		bool colormax = true;
+		bool colormin = true;
+		int color = color_iteration * 2;
+		for (SizeT e = start_edge; e < start_edge + num_neighbors; e++) {
+			VertexT u = graph.CsrT::GetEdgeDest(e);
+
+			// if this neighbor is not in frontier, skip it
+			if (omit[u]) continue;
+
+			if ((util::isValid(colors[u])) && (colors[u] != color + 1) &&   
+        		    (colors[u] != color + 2) || (global_idx == u)) continue;                                                   
+		        if (rand[global_idx] <= rand[u]) colormax = false;                       
+                                                
+		        if (rand[global_idx] >= rand[u]) colormin = false;                     
+                                                              
+		}
+
+		if (colormax) colors[pos] = color + 1;
+		if (colormin) colors[pos] = color + 2;
+            };
+	
+	    GUARD_CU2(cudaStreamSynchronize(multistream_enactor_slices[0].stream), "cudaStreamSynchronize failed");
+            GUARD_CU2(cudaStreamSynchronize(multistream_enactor_slices[1].stream), "cudaStreamSynchronize failed");
+	    // populate colors array (use NULL stream since both omit and colors are needed)
+	    for (color_iteration = 0 ; color_iteration < num_stream / 2; color_iteration++)
+		GUARD_CU(frontier.V_Q()->ForAll(fast_coloring, frontier.queue_length,
+						util::DEVICE, NULL));
+
+	    // clean up intermediate variables
+	    GUARD_CU(colors.Release(util::DEVICE));
+	    GUARD_CU(rand.Release(util::DEVICE));
+	    GUARD_CU(omit.Release(util::DEVICE));
+	}
     }
     return retval;
   }
