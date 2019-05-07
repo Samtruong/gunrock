@@ -85,7 +85,6 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
         util::Array1D<SizeT, VertexT>    temp_preds ; // predecessors of vertices
 
         VertexT src;
-
 	bool color_in;	
 
         /*
@@ -145,7 +144,6 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
 	    )
         {
             cudaError_t retval  = cudaSuccess;
-		
 	    color_in = color_in_;
 
             GUARD_CU(BaseDataSlice::Init(
@@ -217,7 +215,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
     // Set of data slices (one for each GPU)
     util::Array1D<SizeT, DataSlice> *data_slices;
     bool color_in;    
-
+    int num_stream;
 // Graph Coloring Specific - attributes
 typedef color::Problem<GraphT, FLAG> ColorProblem;
 ColorProblem color_problem;
@@ -234,6 +232,7 @@ ColorProblem color_problem;
 	color_problem(_parameters, _flag),
         data_slices(NULL)
     {
+	num_stream = _parameters.Get<int>("num-stream");
 	color_in = _parameters.Get<bool>("color-in");
     }
 

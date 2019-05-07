@@ -36,6 +36,14 @@ cudaError_t UseParameters(util::Parameters &parameters)
     GUARD_CU(UseParameters_problem(parameters));
     GUARD_CU(UseParameters_enactor(parameters));
 
+    GUARD_CU(parameters.Use<int>(
+        "num-stream",
+        util::REQUIRED_ARGUMENT | util::OPTIONAL_PARAMETER,
+        1,
+        "Specify number of streams used in multistreaming\n (default=1)",
+        __FILE__, __LINE__));
+
+
     GUARD_CU(parameters.Use<bool>(
         "color-in",
         util::REQUIRED_ARGUMENT | util::OPTIONAL_PARAMETER,
