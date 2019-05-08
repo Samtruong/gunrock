@@ -148,7 +148,7 @@ struct Problem : ProblemBase<_GraphT, _FLAG>
 
             GUARD_CU(BaseDataSlice::Init(
                 sub_graph, num_gpus, gpu_idx, target, flag));
-            GUARD_CU(distances .Allocate(sub_graph.nodes, target));
+            GUARD_CU(distances .Allocate(sub_graph.nodes, util::HOST | util::DEVICE)); // Minh's mod
             GUARD_CU(labels    .Allocate(sub_graph.nodes, target));
             if (flag & Mark_Predecessors)
             {

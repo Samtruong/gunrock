@@ -107,6 +107,7 @@ struct SSSPIterationLoop
     auto &weights = graph.CsrT::edge_values;
     auto &original_vertex = graph.GpT::original_vertex;
     auto &frontier0 = enactor_slice.frontier;
+    auto &stream0 = enactor_slice.stream;
     auto &oprtr_parameters0 = enactor_slice.oprtr_parameters;
     auto &retval = enactor_stats.retval;
     // auto         &stream             =   enactor_slice.stream;
@@ -228,11 +229,11 @@ Multi-stream Call queue update
       // If it is first iteration, take frontier from normal sssp
       auto &frontier = frontier0;
       auto &oprtr_parameters = oprtr_parameters0;
-
+      auto &stream  = stream0;
 /*==============================================================================
  Perform normal sssp if the queue_length is too small TODO: make threshold a parameter
 ==============================================================================*/
-      if (frontier.queue_length <= graph.nodes / num_stream)	{
+      if (false)	{
     	  // The advance operation
     	  auto advance_op =
     	      [distances, weights, original_vertex, preds, iteration,source] __host__ __device__(
@@ -376,15 +377,160 @@ Multi-stream Call queue update
 	
 	    GUARD_CU2(cudaStreamSynchronize(multistream_enactor_slices[0].stream), "cudaStreamSynchronize failed");
             GUARD_CU2(cudaStreamSynchronize(multistream_enactor_slices[1].stream), "cudaStreamSynchronize failed");
-	    // populate colors array (use NULL stream since both omit and colors are needed)
-	    for (color_iteration = 0 ; color_iteration < num_stream / 2; color_iteration++)
-		GUARD_CU(frontier.V_Q()->ForAll(fast_coloring, frontier.queue_length,
-						util::DEVICE, NULL));
+          // populate colors array
+	    for (color_iteration = 0 ; color_iteration < num_stream / 2; color_iteration++) {
+		GUARD_CU(frontier.V_Q()->ForAll(fast_coloring, frontier.queue_length, util::DEVICE, multistream_enactor_slices[0].stream));
+	    }
 
 	    // clean up intermediate variables
 	    GUARD_CU(colors.Release(util::DEVICE));
 	    GUARD_CU(rand.Release(util::DEVICE));
 	    GUARD_CU(omit.Release(util::DEVICE));
+
+	    
+	    // populate multistream frontiers
+	    for (int color = 0; color < num_stream; color += 1) {
+		auto & output_frontier = multistream_enactor_slices[color].frontier;
+		output_frontier.Reset();
+		output_frontier.Allocate(frontier.queue_length, graph.edges, this->enactor->queue_factors);
+		auto & output_V_Q  = *(output_frontier.V_Q());
+		GUARD_CU(output_V_Q.ForEach([] __host__ __device__(VertexT & x){
+			x = util::PreDefinedValues<VertexT>::InvalidValue;
+		}, frontier.queue_length, util::DEVICE, multistream_enactor_slices[color].stream));
+	        auto partition = [color, colors, output_V_Q, num_stream] __host__ __device__
+	        (VertexT * v_q, const SizeT &pos){
+		    VertexT global_idx = v_q[pos];
+		    if (color == colors[pos] && color < num_stream - 1)
+		 	output_V_Q[pos] = global_idx; 
+		    else if (!util::isValid(colors[pos]) && color == num_stream - 1)
+			output_V_Q[pos] = global_idx;
+			
+				
+	        };
+		frontier.V_Q()->ForAll(partition, frontier.queue_length, util::DEVICE, multistream_enactor_slices[color].stream);
+
+            }
+
+/*==============================================================================
+SSSP Routine with Dynamic MultiStream
+==============================================================================*/
+	   
+	    auto filter_op = [labels, iteration] __host__ __device__(
+                                const VertexT & src, VertexT &dest,
+                                const SizeT &edge_id, const VertexT &input_item,
+                                const SizeT &input_pos, SizeT output_pos) -> bool {
+                     if (!util::isValid(dest)) return false;
+                     if (labels[dest] == iteration) return false;
+                     labels[dest] = iteration;
+                     return true;
+                 };
+ 
+	    // Duplicate multiple distances array, one for each stream
+	    distances.Move(util::DEVICE, util::HOST, graph.nodes);
+	    for (int i = 0; i < num_stream; i++) {
+		stream_distances[i].SetPointer(distances.GetPointer(util::HOST),
+	        graph.nodes, util::HOST);
+		stream_distances[i].Move(util::DEVICE, util::HOST, graph.nodes, 0,
+		multistream_enactor_slices[i].stream);
+	    }
+
+	    // Multistream advance for loop
+	    for (int i = 0; i < num_stream; i++) {
+		
+		 auto & distances_ = stream_distances[i];
+           	 auto advance_op = 
+	   	[distances_, weights, original_vertex, preds, iteration, source] __host__ __device__(
+	   	     	const VertexT &src, VertexT &dest, const SizeT &edge_id,
+	   	     	const VertexT &input_item, const SizeT &input_pos,
+	   	     	SizeT &output_pos) -> bool {
+	   	     if (!util::isValid(src))
+	   	     	return false;
+	   	     
+	   	     ValueT src_distance = Load<cub::LOAD_CG>(distances_ + src);
+           	     ValueT edge_weight = Load<cub::LOAD_CS>(weights + edge_id);
+           	     ValueT new_distance = src_distance + edge_weight;
+
+	   	     ValueT old_distance = atomicMin(distances_ + dest, new_distance);
+
+	   	     if (new_distance < old_distance) return true;
+	   	     else return false;
+	   	 };
+
+	         // Launching advance op - Timed for performance
+		 auto &oprtr_parameters_ = multistream_enactor_slices[i].oprtr_parameters;
+                 auto &frontier_ = multistream_enactor_slices[i].frontier;
+                 auto &stream_ = multistream_enactor_slices[i].stream;
+        	 oprtr_parameters.label = iteration + 1;
+
+        	 // Call the advance operator, using the advance operation
+        	 GUARD_CU(oprtr::Advance<oprtr::OprtrType_V2V>(
+            	 graph.csr(), frontier_.V_Q(), frontier_.Next_V_Q(), oprtr_parameters_,
+            	 advance_op, filter_op));
+	   }
+
+	// Update multistream frontier, prepare to reduce multistream output frontier ...
+	// ... into frontier0 output	
+	SizeT * lengths = new SizeT[num_stream + 1];
+	lengths[0] = (SizeT) 0;
+	SizeT sum = (SizeT) 0;
+        for (int i = 0; i < num_stream; i++) {
+            auto &frontier_ = multistream_enactor_slices[i].frontier;
+            auto &stream_ = multistream_enactor_slices[i].stream;
+            // Get back the resulted frontier length
+            GUARD_CU(frontier_.work_progress.GetQueueLength(
+                frontier_.queue_index, frontier_.queue_length, false, stream_,
+                true));
+ 	    lengths[i + 1] = frontier.queue_length;
+	    sum += frontier.queue_length; 
+        }
+
+	frontier.queue_length = sum;
+	for (int i = 0; i < num_stream; i++) {
+	    util::Array1D <SizeT, VertexT> tmp;
+            tmp.Allocate(lengths[i+1], util::DEVICE);
+	    auto & frontier_ = multistream_enactor_slices[i].frontier;
+	    auto & stream_ = multistream_enactor_slices[i].stream;
+	    GUARD_CU(frontier_.V_Q()->ForEach(
+            tmp, [] __host__ __device__(VertexT & v, VertexT & i) { v = i; },
+            lengths[i+1], util::DEVICE, stream_));
+	} 
+
+	auto reduce_op = 
+	[stream_distances, num_stream, tmp, distances, sum]
+		 __host__ __device__ (ValueT * v_q, const SizeT &pos) {
+		
+		// Update distances array
+		ValueT min_distance = util::PreDefinedValues<ValueT>::MaxValue;
+		for (int i = 0; i < num_stream; i++) {
+			ValueT candidate_distance = stream_distances[i][pos];
+			if (candidate_distance < min_distance)
+				min_distance = candidate_distance;
+		}
+
+		distances[pos] = min_distance;
+
+		// Update frontier0
+		int frontier_counter = 0;
+		if (pos < sum) v_q[pos] = tmp[pos];
+		
+	};	
+
+	// Launching reduce op
+	GUARD_CU(frontier.V_Q()->ForAll(reduce_op, graph.nodes, util::DEVICE, stream));
+
+	if (oprtr_parameters.advance_mode != "LB_CULL" &&
+	    oprtr_parameters.advance_mode != "LB_LIGHT_CULL") {
+		frontier.queue_reset = false;
+
+		// Launching filter op - Timed for performance
+    	        GUARD_CU(oprtr::Filter<oprtr::OprtrType_V2V>(
+    	            graph.csr(), frontier.V_Q(), frontier.Next_V_Q(), oprtr_parameters,
+    	            filter_op));
+	}
+
+        GUARD_CU(frontier.work_progress.GetQueueLength(
+            frontier.queue_index, frontier.queue_length, false, stream,
+            true));
 	}
     }
     return retval;
@@ -624,10 +770,10 @@ class Enactor
     this->h_preds = new VertexT[graph.nodes];
 
     //Create host side memory that will be update every iteration by multipler stream
-    GUARD_CU(distances.SetPointer(this->h_distances, graph.nodes, util::HOST));
-    GUARD_CU(preds.SetPointer(this->h_preds, graph.nodes, util::HOST));
-    distances.Move(util::HOST, util::DEVICE, graph.nodes, 0);
-    preds.Move(util::HOST, util::DEVICE, graph.nodes, 0);
+    //GUARD_CU(distances.SetPointer(this->h_distances, graph.nodes, util::HOST));
+    //GUARD_CU(preds.SetPointer(this->h_preds, graph.nodes, util::HOST));
+    //distances.Move(util::HOST, util::DEVICE, graph.nodes, 0);
+    //preds.Move(util::HOST, util::DEVICE, graph.nodes, 0);
 
     //Allocate space for each instantiation of distances and preds for each stream
     auto & stream_distances = this->stream_distances;
@@ -647,6 +793,8 @@ class Enactor
           this->cuda_props + 0, advance_mode, filter_mode,
           max_grid_size));
       multistream_enactor_slice.oprtr_parameters.labels = &(problem.data_slices[0]->labels);
+      auto &frontier = multistream_enactor_slice.frontier;
+        frontier.Allocate(graph.nodes, graph.edges, this->queue_factors);
     }
 
     for (int gpu = 0; gpu < this->num_gpus; gpu++) {
@@ -890,8 +1038,8 @@ class Enactor
 
         auto &frontier = multistream_enactor_slices[i].frontier;
         // frontier.Allocate(lengths[i], graph.edges, this->queue_factors);
-        frontier.Allocate(graph.nodes, graph.edges, this->queue_factors);
-        GUARD_CU(cudaDeviceSynchronize());
+        // frontier.Allocate(graph.nodes, graph.edges, this->queue_factors);
+        // GUARD_CU(cudaDeviceSynchronize());
 
         frontier.queue_length = lengths[i];
 
@@ -923,17 +1071,17 @@ class Enactor
       printf("Done populating ... \n");
 
       // Move distances and preds from host to stream specific memory
-      for (int i = 0; i < num_stream; i++) {
-        GUARD_CU(stream_distances[i].EnsureSize_(graph.nodes, target));
-        GUARD_CU(stream_preds[i]   .EnsureSize_(graph.nodes, target));
+      //for (int i = 0; i < num_stream; i++) {
+        //GUARD_CU(stream_distances[i].EnsureSize_(graph.nodes, target));
+        //GUARD_CU(stream_preds[i]   .EnsureSize_(graph.nodes, target));
 
-        GUARD_CU(stream_distances[i].SetPointer(h_distances, graph.nodes, util::HOST));
-        GUARD_CU(stream_preds[i] .SetPointer(h_preds, graph.nodes, util::HOST));
+        //GUARD_CU(stream_distances[i].SetPointer(h_distances, graph.nodes, util::HOST));
+        //GUARD_CU(stream_preds[i] .SetPointer(h_preds, graph.nodes, util::HOST));
         // stream is needed for MemcpyAsync
-        auto & stream = multistream_enactor_slices[i].stream;
-        stream_distances[i].Move(util::DEVICE, util::HOST, graph.nodes, 0, stream);
-        stream_preds[i].Move(util::DEVICE, util::HOST, graph.nodes, 0, stream);
-      }
+        // auto & stream = multistream_enactor_slices[i].stream;
+        // stream_distances[i].Move(util::DEVICE, util::HOST, graph.nodes, 0, stream);
+        // stream_preds[i].Move(util::DEVICE, util::HOST, graph.nodes, 0, stream);
+      //}
 
       this->thread_slices[0].init_size = 1;
     } //end if color_in
